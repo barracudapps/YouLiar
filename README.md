@@ -17,6 +17,19 @@ npm run build        # paquet installable (.app/.dmg, .msi, .deb/.AppImage)
 cargo test --workspace
 ```
 
+### Moteur web (joueurs dans un navigateur)
+
+`npm run web` compile `crates/youliar-web` en WebAssembly dans `ui/web/` (fait
+automatiquement avant `tauri dev` et `tauri build`). Prérequis, une fois :
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.130 --locked
+```
+
+Test de bout en bout avec un vrai navigateur : `YOULIAR_E2E=/tmp/e2e.txt cargo test -p youliar
+e2e_browser -- --ignored`, puis ouvrir `https://127.0.0.1:<port écrit dans le fichier>/#join=<code>`.
+
 ### Mobile
 
 ```bash
@@ -88,6 +101,14 @@ verdicts prennent le vocabulaire de l'histoire, et l'épilogue attribue un grade
 selon le classement. Les textes sont dans `crates/youliar-core/src/themes.rs` ; seul
 l'identifiant de l'histoire circule sur le réseau.
 
+**Rejoindre sans installer** : l'hôte sert l'interface aux navigateurs du réseau local
+(HTTPS, port 47822). Un téléphone scanne le QR code avec son appareil photo, accepte une fois
+l'avertissement de sécurité (certificat créé par l'hôte, conservé d'une session à l'autre) et
+joue dans Safari ou Chrome. Le moteur Rust y tourne en WebAssembly : analyse de la voix et de
+la caméra, profils et calibrage restent sur le téléphone (stockage du navigateur) ; la
+connexion à l'hôte utilise le même protocole chiffré, par WebSocket. Héberger une partie
+nécessite l'application.
+
 **Rejoindre** : scanner le QR code affiché par l'hôte (caméra de l'appareil qui rejoint,
 décodage local), choisir une partie détectée sur le réseau, ou saisir l'adresse et le code.
 
@@ -100,7 +121,7 @@ des questions, effacement de toutes les données ; nom et avatar modifiables dan
 
 ## Déroulé (mode jeu)
 
-1. **Calibrage** (~3 min, par joueur, conservé entre les parties) :
+1. **Calibrage** (~4 min, par joueur, conservé entre les parties) :
    test micro → caméra facultative (15 s immobile : pouls de repos, lumière) → 2 lectures
    (empreinte vocale, ton habituel) → comptage (ligne de base) → 4 vérités et 4 mensonges
    imposés, lus à voix haute par la machine.
@@ -141,7 +162,8 @@ ui/                      interface HTML/CSS/JS sans framework : capture micro/ca
 L'hôte détient l'unique état de partie qui fait foi. Une partie locale est un hôte sans
 réseau : le même code sert pour les deux modes.
 
-Ports : TCP 47820 (partie), UDP 47821 (découverte). Sur mobile, la caméra n'analyse que
+Ports : TCP 47820 (partie), UDP 47821 (découverte), TCP 47822 (page HTTPS et WebSocket pour
+les navigateurs). Sur mobile, la caméra n'analyse que
 5 images/s hors des mesures (30 images/s pendant la réponse du joueur) et s'arrête quand
 l'application passe en arrière-plan.
 

@@ -4,7 +4,9 @@
   "version": "0.7.0",
   "identifier": "com.barracudapps.youliar",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../ui",
+    "beforeBuildCommand": "npm run web",
+    "beforeDevCommand": "npm run web"
   },
   "app": {
     "withGlobalTauri": true,

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/youliar-core", "src-tauri"]
+members = ["crates/youliar-core", "crates/youliar-web", "src-tauri"]
 
 [workspace.package]
 version = "0.7.0"

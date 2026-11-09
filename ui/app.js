@@ -2,7 +2,19 @@ import { Media, speak, Trace } from './media.js';
 import { fx, keepAwake, reducedMotion } from './fx.js';
 import { EdgeLight, lightControl } from './light.js';
 
-const TAURI = window.__TAURI__;
+// Dans l'application : API Tauri. Dans un navigateur (page servie par l'hôte) : moteur
+// WebAssembly et connexion WebSocket, avec la même interface.
+const TAURI = window.__TAURI__ ?? (await import('./web-shim.js').then((m) => m.install()).catch((e) => {
+  console.error('Mode navigateur indisponible', e);
+  return null;
+}));
+const WEB = !!TAURI?.web;
+/** Invitation reçue par lien (#join=code) : utilisée pour rejoindre depuis le navigateur. */
+const INVITE = (() => {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const code = (p.get('join') ?? '').replace(/\D/g, '');
+  return code.length === 6 ? { code } : null;
+})();
 const app = document.getElementById('app');
 const backBtn = document.getElementById('back');
 const badge = document.getElementById('session-badge');
@@ -295,6 +307,23 @@ const SCREENS = {};
 SCREENS.home = () => {
   const first = !S.profiles.length;
   const calibrated = S.profiles.filter((p) => p.calibrated).length;
+  if (WEB) {
+    app.innerHTML = `
+    <section class="card hero">
+      <div class="logo" aria-hidden="true">🕵️</div>
+      <h2>Tu es invité(e) à une partie</h2>
+      <p class="muted">Partie hébergée par <b>${esc(location.hostname)}</b>. Tout se passe dans ce navigateur : ta voix et ton image sont analysées sur ce téléphone et ne sont jamais envoyées.</p>
+      ${first ? '<button class="primary big" data-goto="profiles">1. Crée ton joueur</button>' : '<button class="primary big" data-goto="join">Rejoindre la partie</button>'}
+    </section>
+    <nav class="menu">
+      <button data-goto="join"><span class="emoji">🔗</span><span>Rejoindre la partie<small>${INVITE ? 'Code reçu avec le lien' : 'Code affiché chez l\'hôte'}</small></span></button>
+      <button data-goto="profiles"><span class="emoji">🎙️</span><span>Joueurs & calibrage<small>${S.profiles.length} profil(s) · ${calibrated} calibré(s) · enregistrés dans ce navigateur</small></span></button>
+      <button data-goto="settings"><span class="emoji">⚙️</span><span>Réglages<small>Son, vibrations, caméra, voix, données</small></span></button>
+      <button data-goto="rules"><span class="emoji">📖</span><span>Comment jouer<small>Mode jeu, mode libre, points</small></span></button>
+    </nav>
+    ${DISCLAIMER}`;
+    return bindCommon();
+  }
   app.innerHTML = `
     <section class="card hero">
       <div class="logo" aria-hidden="true">🕵️</div>
@@ -676,6 +705,22 @@ SCREENS.host = () => setupScreen({ title: '📡 Créer une partie réseau', intr
 
 SCREENS.join = () => {
   const pre = S.profiles.filter((p) => p.calibrated).map((p) => p.id).slice(0, 1);
+  if (WEB) {
+    app.innerHTML = `
+    <h2>🔗 Rejoindre la partie</h2>
+    <section class="card"><h3>Joueur(s) sur cet appareil</h3>${profilePicker(pre.length ? pre : S.profiles.map((p) => p.id).slice(0, 1))}
+      <button class="ghost" data-goto="profiles">＋ Nouveau joueur</button></section>
+    <section class="card">
+      <label class="field"><span>Code de la partie (6 chiffres)</span><input type="text" id="code" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="000000" value="${esc(INVITE?.code ?? '')}"></label>
+      <p class="muted small">🔒 Connexion chiffrée à l'hôte <b>${esc(location.host)}</b>. Le code n'est jamais envoyé : il sert à établir le chiffrement.</p>
+      <label class="check"><input type="checkbox" id="cam" ${S.useCamera ? 'checked' : ''}> Utiliser la caméra de ce téléphone</label>
+      <button class="primary big" id="go">Rejoindre</button>
+    </section>`;
+    bindCommon();
+    $('#code').oninput = (e) => { e.target.value = e.target.value.replace(/\D/g, ''); };
+    $('#go').onclick = () => joinGame([location.hostname]);
+    return;
+  }
   app.innerHTML = `
     <h2>🔗 Rejoindre une partie</h2>
     <section class="card"><h3>Joueur(s) sur cet appareil</h3>${profilePicker(pre)}
@@ -711,7 +756,7 @@ async function joinGame(ips) {
   const ids = picked();
   if (!ids.length) return toast('Choisis au moins un joueur.', true);
   S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera));
-  const port = Number($('#port').value) || 47820;
+  const port = Number($('#port')?.value) || 47820;
   const code = $('#code').value.trim();
   $('#go').disabled = true;
   $('#go').textContent = 'Connexion…';
@@ -788,8 +833,18 @@ function stopScanner() {
   if (box) box.innerHTML = '';
 }
 
-/** « YOULIAR1;ip1,ip2;port;code » — donnée lue d'une image : tout est revalidé. */
+/**
+ * « YOULIAR1;ip1,ip2;port;code » ou lien d'invitation
+ * « https://ip:port/#join=code&p=port&ips=ip1,ip2 » — donnée lue d'une image : tout est revalidé.
+ */
 function parseJoinQr(text) {
+  if (text.startsWith('https://')) {
+    try {
+      const u = new URL(text);
+      const q = new URLSearchParams(u.hash.slice(1));
+      return parseJoinQr(`YOULIAR1;${q.get('ips') || u.hostname};${q.get('p')};${q.get('join')}`);
+    } catch { return null; }
+  }
   const [tag, ipList, port, code] = text.split(';');
   const ipv4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
   const ips = (ipList ?? '').split(',').filter((ip) => ipv4.test(ip)).slice(0, 8);
@@ -905,9 +960,11 @@ const STAGES = {
       </section>
       ${net ? `<section class="card center">
           <div class="qr" id="qr" aria-label="QR code pour rejoindre la partie"></div>
-          <p class="muted small">Scanne ce QR code depuis « Rejoindre une partie », ou saisis le code :</p>
+          <p class="small">📱 <b>Sans rien installer</b> : scanne ce QR code avec l'appareil photo d'un téléphone. La première fois, le navigateur affiche un avertissement de sécurité (certificat créé par cet ordinateur) : choisis de continuer.</p>
+          <p class="muted small">Avec l'application : « Rejoindre une partie » → scanner, ou saisis le code :</p>
           <div class="big-code" aria-label="Code ${esc(net.code.split('').join(' '))}">${esc(net.code.slice(0, 3))}<span>${esc(net.code.slice(3))}</span></div>
           <p class="ip-list">${net.ips.map((ip) => `${esc(ip)}:${net.port}`).join('<br>') || 'Aucune adresse réseau détectée'}</p>
+          ${net.web_url ? `<p class="ip-list small">🌐 ${esc(net.web_url.split('#')[0])}${net.fingerprint ? `<br>🔏 ${esc(net.fingerprint)}` : ''}</p>` : ''}
           <p class="muted small">Sur les autres appareils : « Rejoindre une partie ». 🔒 Connexions chiffrées : ne montre ce code qu'aux joueurs présents.</p>
         </section>` : ''}
       <section class="card"><h3>Joueurs (${v.players.length})</h3>
@@ -1424,9 +1481,10 @@ document.addEventListener('keydown', (e) => {
 
 async function boot() {
   if (!TAURI) {
-    app.innerHTML = `<section class="card"><h3>Application native requise</h3><p class="muted">Cette interface tourne dans l'application YouLiar (Tauri). Lance <code>npm run dev</code>.</p></section>`;
+    app.innerHTML = `<section class="card"><h3>Navigateur non pris en charge</h3><p class="muted">Ouvre le lien d'invitation dans une version récente de Safari, Chrome ou Firefox, ou installe l'application YouLiar.</p></section>`;
     return;
   }
+  if (WEB) document.body.classList.add('web');
   const { listen } = TAURI.event;
   await listen('game-state', (e) => {
     const prev = S.view;

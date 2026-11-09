@@ -3,6 +3,7 @@
 #[cfg(desktop)]
 mod edge;
 mod net;
+mod web;
 
 use net::{HostInfo, Session, SessionInfo};
 
@@ -168,7 +169,9 @@ fn host_qr(state: State<AppState>) -> Result<String, String> {
         Some(SessionInfo::Host { info }) => info,
         _ => return Err("Aucune partie réseau hébergée.".into()),
     };
-    let payload = format!("YOULIAR1;{};{};{}", info.ips.join(","), info.port, info.code);
+    // Le lien d'invitation s'ouvre avec l'appareil photo d'un téléphone (navigateur) et se
+    // lit aussi avec le scanner de l'application.
+    let payload = info.web_url.clone().unwrap_or_else(|| format!("YOULIAR1;{};{};{}", info.ips.join(","), info.port, info.code));
     let qr = qrcode::QrCode::new(payload.as_bytes()).map_err(|e| e.to_string())?;
     Ok(qr
         .render::<qrcode::render::svg::Color>()
@@ -200,7 +203,7 @@ fn find_join_qr(w: usize, h: usize, pixels: &[u8]) -> Option<String> {
         .iter()
         .filter_map(|g| g.decode().ok())
         .map(|(_, content)| content)
-        .find(|c| c.starts_with("YOULIAR1;") && c.len() < 512)
+        .find(|c| (c.starts_with("YOULIAR1;") || (c.starts_with("https://") && c.contains("#join="))) && c.len() < 512)
 }
 
 #[tauri::command]
@@ -326,7 +329,14 @@ fn session_local(app: AppHandle, state: State<AppState>) -> SessionInfo {
 #[tauri::command]
 async fn session_host(app: AppHandle, state: State<'_, AppState>, game_name: String) -> Result<HostInfo, String> {
     replace_session(&state, None);
-    let h = net::start_host(emitter(app), game_name, state.used_questions(), state.used_sink()).await?;
+    let h = net::start_host(emitter(app.clone()), game_name, state.used_questions(), state.used_sink()).await?;
+    // Page pour rejoindre depuis un navigateur ; la partie reste jouable sans elle.
+    let resolver = app.asset_resolver();
+    let assets: web::Assets = Arc::new(move |path: &str| resolver.get(path.to_string()).map(|a| (a.bytes, a.mime_type)));
+    let cert_dir = state.profiles_path.lock().unwrap().as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    if let Err(e) = web::start(&h, assets, cert_dir).await {
+        eprintln!("Page web indisponible : {e}");
+    }
     let info = h.info().ok_or("Hôte sans adresse réseau.")?;
     replace_session(&state, Some(Session::Host(h)));
     Ok(info)

@@ -7,7 +7,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "icons": "tauri icon src-tauri/app-icon.png"
+    "icons": "tauri icon src-tauri/app-icon.png",
+    "web": "scripts/build-web.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, Semaphore};
 use youliar_core::game::{Action, Game, GameView, PlayerInfo, Stage, HOST_DEVICE};
@@ -110,8 +109,12 @@ fn parse_handshake(frame: &[u8]) -> Option<(u32, &[u8])> {
     (frame.len() > 4).then(|| (u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]), &frame[4..]))
 }
 
+/// Moitiés d'un flux d'octets : TCP (application) ou WebSocket ponté (navigateur).
+pub(crate) type Rd = Box<dyn AsyncRead + Unpin + Send>;
+pub(crate) type Wr = Box<dyn AsyncWrite + Unpin + Send>;
+
 struct SecureTx {
-    w: OwnedWriteHalf,
+    w: Wr,
     sealer: Sealer,
 }
 
@@ -124,7 +127,7 @@ impl SecureTx {
 }
 
 struct SecureRx {
-    r: OwnedReadHalf,
+    r: Rd,
     opener: Opener,
 }
 
@@ -154,6 +157,26 @@ pub struct HostInfo {
     pub ips: Vec<String>,
     pub port: u16,
     pub code: String,
+    /// Page servie aux navigateurs (rejoindre sans installer l'application).
+    pub web_port: Option<u16>,
+    pub web_url: Option<String>,
+    /// Empreinte du certificat HTTPS, à comparer en cas de doute.
+    pub fingerprint: Option<String>,
+}
+
+impl HostInfo {
+    fn new(ips: Vec<String>, port: u16) -> Self {
+        Self { ips, port, code: new_code(), web_port: None, web_url: None, fingerprint: None }
+    }
+
+    /// Lien d'invitation : la page de l'hôte, avec le code et les adresses pour
+    /// l'application (le fragment `#…` n'est jamais envoyé au serveur).
+    pub(crate) fn refresh_url(&mut self) {
+        self.web_url = match (self.web_port, self.ips.first()) {
+            (Some(wp), Some(ip)) => Some(format!("https://{ip}:{wp}/#join={}&p={}&ips={}", self.code, self.port, self.ips.join(","))),
+            _ => None,
+        };
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,7 +209,7 @@ pub struct HostShared {
     slots: Arc<Semaphore>,
     next_id: AtomicU64,
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    info: Mutex<Option<HostInfo>>,
+    pub(crate) info: Mutex<Option<HostInfo>>,
     /// Manche dont la révélation automatique est déjà programmée.
     vote_timer: Mutex<Option<u32>>,
     used_sink: Option<UsedSink>,
@@ -289,7 +312,7 @@ impl HostShared {
         send_evt(&self.emit, EVT_STATE, game.view_for(HOST_DEVICE));
     }
 
-    fn spawn(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    pub(crate) fn spawn(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
         let t = tauri::async_runtime::spawn(fut);
         let mut tasks = self.tasks.lock().unwrap();
         tasks.retain(|t| !t.inner().is_finished());
@@ -348,6 +371,7 @@ impl HostShared {
                 let mut i = self.info.lock().unwrap();
                 if let Some(info) = i.as_mut() {
                     info.code = new_code();
+                    info.refresh_url();
                 }
                 i.clone()
             };
@@ -403,7 +427,7 @@ pub async fn start_host(emit: Emit, game_name: String, used: Vec<String>, used_s
     let mut game = Game::default();
     game.set_used_questions(used);
     game.apply(HOST_DEVICE, Action::UpdateSettings { settings: youliar_core::game::Settings { game_name, ..Default::default() } })?;
-    let info = HostInfo { ips: local_ipv4().iter().map(|(ip, _)| ip.to_string()).collect(), port, code: new_code() };
+    let info = HostInfo::new(local_ipv4().iter().map(|(ip, _)| ip.to_string()).collect(), port);
     let h = Arc::new(HostShared::new(emit, game, Some(info), used_sink));
 
     let hh = h.clone();
@@ -435,8 +459,7 @@ async fn beacon_loop(h: Arc<HostShared>, port: u16) {
 }
 
 /// Poignée de main côté hôte. Renvoie les deux moitiés chiffrées et le premier message.
-async fn host_handshake(h: &HostShared, stream: TcpStream, ip: IpAddr) -> Option<(SecureTx, SecureRx, ClientMsg)> {
-    let (mut r, mut w) = stream.into_split();
+async fn host_handshake(h: &HostShared, mut r: Rd, mut w: Wr, ip: IpAddr) -> Option<(SecureTx, SecureRx, ClientMsg)> {
     let frame = read_frame(&mut r).await.ok()?;
     let (version, msg) = parse_handshake(&frame)?;
     if version != PROTOCOL_VERSION {
@@ -466,18 +489,22 @@ async fn host_handshake(h: &HostShared, stream: TcpStream, ip: IpAddr) -> Option
 
 async fn handle_peer(h: Arc<HostShared>, stream: TcpStream, addr: SocketAddr) {
     let _ = stream.set_nodelay(true);
-    let ip = addr.ip();
+    let (r, w) = stream.into_split();
+    serve_peer(h, Box::new(r), Box::new(w), addr.ip()).await;
+}
+
+/// Sert un appareil, quel que soit le transport (TCP direct, ou WebSocket ponté pour
+/// un navigateur) : mêmes limites, même poignée de main chiffrée, mêmes règles.
+pub(crate) async fn serve_peer(h: Arc<HostShared>, r: Rd, mut w: Wr, ip: IpAddr) {
     let Ok(_slot) = h.slots.clone().try_acquire_owned() else {
-        let mut s = stream;
-        let _ = write_frame(&mut s, &[REFUSE_BUSY]).await;
+        let _ = write_frame(&mut w, &[REFUSE_BUSY]).await;
         return;
     };
     if h.is_banned(ip) {
-        let mut s = stream;
-        let _ = write_frame(&mut s, &[REFUSE_BUSY]).await;
+        let _ = write_frame(&mut w, &[REFUSE_BUSY]).await;
         return;
     }
-    let Ok(Some((mut tx, mut rx, hello))) = tokio::time::timeout(HANDSHAKE_TIMEOUT, host_handshake(&h, stream, ip)).await else {
+    let Ok(Some((mut tx, mut rx, hello))) = tokio::time::timeout(HANDSHAKE_TIMEOUT, host_handshake(&h, r, w, ip)).await else {
         return;
     };
     let ClientMsg::Hello { players, resume } = hello else { return };
@@ -646,7 +673,8 @@ async fn connect(addr: SocketAddr, code: &str, players: &[PlayerInfo], resume: O
         .map_err(|_| soft("L'hôte ne répond pas (même réseau ? pare-feu ?)."))?
         .map_err(|e| soft(&format!("Connexion impossible : {e}")))?;
     let _ = stream.set_nodelay(true);
-    let (mut r, mut w) = stream.into_split();
+    let (r, w) = stream.into_split();
+    let (mut r, mut w): (Rd, Wr) = (Box::new(r), Box::new(w));
     let handshake = async {
         let (hs, out) = Handshake::start(Role::Client, code);
         write_frame(&mut w, &handshake_payload(&out)).await.map_err(|_| soft("Connexion interrompue."))?;
