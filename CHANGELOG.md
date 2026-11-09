@@ -6,6 +6,14 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.7.0] — 2026-11-09
+
+### Ajouté
+- **Histoires** : agent du KGB, espion de la CIA, star de cinéma, meurtre au manoir,
+  mutinerie à bord. Prologue et chapitres lus à voix haute, questions à jouer dans son rôle,
+  consignes et verdicts dans le vocabulaire de l'histoire, épilogue et grades selon le
+  classement, couleurs propres à chaque histoire.
+
 ## [0.6.0] — 2026-11-09
 
 ### Ajouté

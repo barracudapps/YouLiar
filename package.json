@@ -1,7 +1,7 @@
 {
   "name": "youliar",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Détecteur de mensonges de soirée (Rust + Tauri 2)",
   "scripts": {
     "tauri": "tauri",
