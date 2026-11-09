@@ -6,6 +6,25 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.8.0] — 2026-11-09
+
+### Ajouté
+- **Rejoindre depuis un navigateur, sans installer l'application** : l'hôte sert l'interface
+  en HTTPS sur le réseau local ; le QR code du salon s'ouvre avec l'appareil photo d'un
+  téléphone. Analyse, profils et calibrage tournent dans le navigateur (WebAssembly) ;
+  connexion chiffrée identique à celle de l'application.
+
+### Amélioré
+- **Détection des mensonges** : calibrage par paires (chaque question posée une fois en
+  vérité, une fois en mensonge, ordre contrebalancé), ligne de base robuste (médiane, écart
+  absolu médian), réglage du modèle par validation croisée, correction de la dérive des
+  conditions pendant la partie.
+- Fiabilité mesurée affichée après le calibrage, avec les indices qui trahissent le joueur.
+
+### À savoir
+- Les profils existants restent valables, mais **un nouveau calibrage est recommandé** pour
+  profiter du protocole par paires et obtenir une fiabilité mesurée.
+
 ## [0.7.0] — 2026-11-09
 
 ### Ajouté
