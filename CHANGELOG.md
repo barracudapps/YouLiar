@@ -6,6 +6,24 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.6.0] — 2026-11-09
+
+### Ajouté
+- Temps de vote réglable (15, 30, 60 s ou illimité) avec compte à rebours et révélation
+  automatique.
+- Rejoindre une partie en scannant le QR code affiché par l'hôte ; essai de chacune de ses
+  adresses.
+- Écran Réglages : sons, vibrations, caméra, halo, voix et vitesse de lecture, effacement de
+  toutes les données, version.
+- Modification du nom et de l'avatar d'un profil ; raccourcis clavier pour voter (V, M, S).
+- Les questions déjà posées ne reviennent plus d'une soirée à l'autre.
+
+### Performance
+- La caméra n'analyse plus que 5 images/s hors des mesures et s'arrête en arrière-plan.
+
+### Sécurité
+- CSP renforcée, prototypes JavaScript gelés, audit des dépendances (`SECURITY.md`).
+
 ## [0.5.1] — 2026-11-09
 
 ### Corrigé
