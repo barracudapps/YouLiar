@@ -68,10 +68,13 @@ export class EdgeLight {
     if (!on) this.dark = 0;
     try {
       this.screenEdges = await this.invoke('edge_light', { on, strength: s });
-    } catch {
-      this.screenEdges = false;
+    } catch (e) {
+      // Échec sur ordinateur : surtout pas de second halo dans la fenêtre.
+      console.warn('Halo lumineux indisponible', e);
+      this.screenEdges = null;
     }
-    // Sans bandes d'écran (mobile, ou échec), on éclaire depuis l'interface.
+    // Le halo dans l'interface est réservé aux plateformes sans bandes d'écran (mobile),
+    // que le cœur signale explicitement par `false`.
     const inApp = on && this.screenEdges === false;
     this.glow?.classList.toggle('on', inApp);
     this.glow?.style.setProperty('--glow', String(s));
