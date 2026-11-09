@@ -342,3 +342,8 @@ body[data-theme="cia"] { --accent: #2f6fdb; --accent2: #8fc1ff; background: radi
 body[data-theme="actor"] { --accent: #c99a2e; --accent2: #ff5f8f; background: radial-gradient(1200px 600px at 50% -200px, #3d2a10 0%, var(--bg) 60%) fixed, var(--bg); }
 body[data-theme="manor"] { --accent: #8a6a3b; --accent2: #d9a066; background: radial-gradient(1200px 600px at 50% -200px, #2e2214 0%, var(--bg) 60%) fixed, var(--bg); }
 body[data-theme="pirate"] { --accent: #179c8c; --accent2: #f2c14e; background: radial-gradient(1200px 600px at 50% -200px, #0f3a3a 0%, var(--bg) 60%) fixed, var(--bg); }
+
+/* ---------- Fiabilité du profil ---------- */
+.reliability { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 12px; border-radius: 12px; background: var(--bg2); }
+.reliability > b { font-size: 2rem; color: var(--accent2); line-height: 1; }
+.reliability > span { font-size: .8rem; color: var(--muted); }

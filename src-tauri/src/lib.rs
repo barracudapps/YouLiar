@@ -5,7 +5,7 @@ mod edge;
 mod net;
 
 use net::{HostInfo, Session, SessionInfo};
-use serde::{Deserialize, Serialize};
+
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::async_runtime::JoinHandle;
@@ -14,8 +14,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use youliar_core::audio::{self, AudioFeatures};
 use youliar_core::game::{Action, GameView, PlayerInfo};
-use youliar_core::model::{self, Label, PlayerProfile, PlayerStats, Sample, Traits, Verdict};
-use youliar_core::questions::{calibration_steps, CalibKind, CalibStep};
+use youliar_core::model::{self, CalibTake, Measures, PlayerProfile, ProfileSummary, Verdict};
+use youliar_core::questions::{calibration_steps, CalibStep};
 use youliar_core::video::{self, VideoFeatures, VideoSample};
 
 #[derive(Default)]
@@ -24,6 +24,8 @@ struct AppState {
     profiles_path: Mutex<Option<PathBuf>>,
     used_path: Mutex<Option<PathBuf>>,
     session: Mutex<Option<Session>>,
+    /// Mesures des réponses déjà données dans la partie en cours, par profil.
+    session_measures: Mutex<std::collections::HashMap<String, Vec<Measures>>>,
     discovery: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -86,38 +88,6 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
 const MAX_AUDIO_BYTES: usize = 60 * 96_000 * 4; // 60 s à 96 kHz
 const MAX_VIDEO_SAMPLES: usize = 60 * 60; // 60 s à 60 i/s
 const MAX_TAKES: usize = 40;
-
-/// Ce que l'interface a besoin de savoir d'un profil (sans les données d'apprentissage).
-#[derive(Serialize)]
-struct ProfileSummary {
-    id: String,
-    name: String,
-    avatar: String,
-    calibrated: bool,
-    camera_calibrated: bool,
-    resting_hr: Option<f32>,
-    answers_learned: u32,
-    has_voice: bool,
-    traits: Traits,
-    stats: PlayerStats,
-}
-
-impl From<&PlayerProfile> for ProfileSummary {
-    fn from(p: &PlayerProfile) -> Self {
-        Self {
-            id: p.id.clone(),
-            name: p.name.clone(),
-            avatar: p.avatar.clone(),
-            calibrated: p.calibrated,
-            camera_calibrated: p.camera_calibrated,
-            resting_hr: p.resting_hr,
-            answers_learned: p.answers_learned,
-            has_voice: p.voice.is_some(),
-            traits: p.traits(),
-            stats: p.stats.clone(),
-        }
-    }
-}
 
 fn player_info(p: &PlayerProfile) -> PlayerInfo {
     PlayerInfo { id: p.id.clone(), name: p.name.clone(), avatar: p.avatar.clone(), calibrated: p.calibrated }
@@ -277,57 +247,15 @@ async fn analyze_video(samples: Vec<VideoSample>) -> Result<VideoFeatures, Strin
     tauri::async_runtime::spawn_blocking(move || video::analyze(&samples)).await.map_err(|e| e.to_string())
 }
 
-#[derive(Deserialize)]
-struct CalibTake {
-    kind: CalibKind,
-    audio: AudioFeatures,
-    video: Option<VideoFeatures>,
-}
-
 #[tauri::command]
 async fn calibration_finish(state: State<'_, AppState>, profile_id: String, takes: Vec<CalibTake>, resting: Option<VideoFeatures>) -> Result<ProfileSummary, String> {
     if takes.len() > MAX_TAKES {
         return Err("Trop de prises.".into());
     }
-    let answers = takes.iter().filter(|t| matches!(t.kind, CalibKind::Truth | CalibKind::Lie) && t.audio.speech_detected).count();
-    if answers < 2 {
-        return Err("Pas assez de réponses exploitables : recommence le calibrage dans un endroit calme.".into());
-    }
-    let samples: Vec<Sample> = takes
-        .iter()
-        .filter(|t| t.audio.speech_detected)
-        .map(|t| {
-            let mut m = model::measures(&t.audio, t.video.as_ref());
-            let label = match t.kind {
-                CalibKind::Voice | CalibKind::Neutral => {
-                    // Lire ou compter n'est pas répondre : latence et durée ne sont pas comparables.
-                    m.remove("latency");
-                    m.remove("duration");
-                    Label::Neutral
-                }
-                CalibKind::Truth => Label::Truth,
-                CalibKind::Lie => Label::Lie,
-            };
-            Sample { measures: m, label }
-        })
-        .collect();
-    let voices: Vec<AudioFeatures> = takes.iter().map(|t| t.audio.clone()).collect();
-    let mut resting_hr = resting.as_ref().and_then(|v| v.heart_rate);
-    if resting_hr.is_none() {
-        let hrs: Vec<f32> = takes.iter().filter_map(|t| t.video.as_ref()?.heart_rate).collect();
-        if !hrs.is_empty() {
-            resting_hr = Some(hrs.iter().sum::<f32>() / hrs.len() as f32);
-        }
-    }
     state.with_profile(&profile_id, |p| {
-        p.calibrate(samples, &voices, resting_hr);
-        if let Some(r) = &resting {
-            if r.duration_s > 3.0 {
-                p.camera_calibrated = true;
-            }
-        }
-        ProfileSummary::from(&*p)
-    })
+        p.calibrate_from_takes(&takes, resting.as_ref())?;
+        Ok(ProfileSummary::from(&*p))
+    })?
 }
 
 #[tauri::command]
@@ -338,14 +266,20 @@ async fn score_answer(
     video: Option<VideoFeatures>,
     candidates: Vec<String>,
 ) -> Result<Verdict, String> {
-    if !audio.speech_detected {
-        return Err("Aucune voix détectée : parle plus près du micro et recommence.".into());
+    let verdict = {
+        let list = state.profiles.lock().unwrap();
+        let p = list.iter().find(|p| p.id == profile_id).ok_or("Profil introuvable.")?;
+        let others: Vec<&PlayerProfile> = list.iter().filter(|c| c.id == profile_id || candidates.iter().take(12).any(|id| id == &c.id)).collect();
+        let session = state.session_measures.lock().unwrap();
+        p.verdict_for(&audio, video.as_ref(), &others, session.get(&profile_id).map_or(&[][..], Vec::as_slice))?
+    };
+    // Mémorisé pour corriger la dérive du jour lors des réponses suivantes de ce joueur.
+    let mut session = state.session_measures.lock().unwrap();
+    let list = session.entry(profile_id).or_default();
+    list.push(model::measures(&audio, video.as_ref()));
+    if list.len() > 50 {
+        list.remove(0);
     }
-    let list = state.profiles.lock().unwrap();
-    let p = list.iter().find(|p| p.id == profile_id).ok_or("Profil introuvable.")?;
-    let mut verdict = p.score(&model::measures(&audio, video.as_ref()));
-    let others: Vec<&PlayerProfile> = list.iter().filter(|c| c.id == profile_id || candidates.iter().take(12).any(|id| id == &c.id)).collect();
-    verdict.speaker = model::identify_speaker(&audio, &profile_id, &others);
     Ok(verdict)
 }
 
@@ -358,14 +292,11 @@ async fn learn_answer(
     lie: bool,
     machine_correct: bool,
 ) -> Result<ProfileSummary, String> {
-    state.with_profile(&profile_id, |p| {
-        p.record_outcome(lie, machine_correct);
-        p.learn(model::measures(&audio, video.as_ref()), lie);
-        if let Some(v) = p.voice.as_mut() {
-            v.merge(&audio);
-        }
+    let summary = state.with_profile(&profile_id, |p| {
+        p.learn_answer(&audio, video.as_ref(), lie, machine_correct);
         ProfileSummary::from(&*p)
-    })
+    });
+    summary
 }
 
 // ---------- Sessions ----------
@@ -377,6 +308,8 @@ fn emitter(app: AppHandle) -> net::Emit {
 }
 
 fn replace_session(state: &AppState, s: Option<Session>) {
+    // Nouvelle partie, nouvelles conditions : la correction de dérive repart de zéro.
+    state.session_measures.lock().unwrap().clear();
     let old = std::mem::replace(&mut *state.session.lock().unwrap(), s);
     if let Some(old) = old {
         old.stop();

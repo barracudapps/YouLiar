@@ -222,6 +222,16 @@ function idCard(p) {
   return `<div class="idcard">${rows.map(([i, l, v]) => `<div><span>${i} ${l}</span><b>${esc(v)}</b></div>`).join('')}</div>`;
 }
 
+/** Fiabilité mesurée en validation croisée sur les réponses connues du joueur. */
+function reliabilityCard(p) {
+  if (p.reliability == null) return '';
+  const pct = Math.round(p.reliability * 100);
+  const verdict = pct >= 75 ? 'La machine lit en toi comme dans un livre.' : pct >= 60 ? 'La machine a repéré tes tics.' : 'Tu es difficile à lire… la machine apprendra au fil des parties.';
+  return `<div class="reliability"><b>${pct} %</b><span>de mensonges et de vérités bien reconnus pendant le calibrage</span>
+    <p class="small">${verdict}</p>
+    ${p.tells?.length ? `<p class="small muted">Ce qui te trahit : ${p.tells.map(esc).join(' · ')}</p>` : ''}</div>`;
+}
+
 function statsLine(p) {
   const s = p.stats;
   if (!s?.answers) return '';
@@ -413,7 +423,7 @@ SCREENS.profiles = () => {
           <div class="row">
             <span class="avatar big">${esc(p.avatar)}</span>
             <div class="grow"><b>${esc(p.name)}</b><br><span class="tag">${p.calibrated
-              ? `✓ calibré${p.camera_calibrated ? ' · 📷' : ''}${p.answers_learned ? ` · ${p.answers_learned} réponses apprises` : ''}`
+              ? `✓ calibré${p.camera_calibrated ? ' · 📷' : ''}${p.reliability != null ? ` · fiabilité ${Math.round(p.reliability * 100)} %` : ''}${p.answers_learned ? ` · ${p.answers_learned} réponses apprises` : ''}`
               : '<span class="warn">à calibrer</span>'}</span></div>
             <button class="ghost" data-edit="${esc(p.id)}" aria-label="Modifier ${esc(p.name)}">✏️</button>
             <button class="${p.calibrated ? 'ghost' : 'primary'}" data-cal="${esc(p.id)}">${p.calibrated ? 'Recalibrer' : 'Calibrer'}</button>
@@ -485,7 +495,8 @@ SCREENS.calibrate = ({ id, returnTo }) => {
       app.innerHTML = `${head()}
         <section class="card">
           <p>La machine va apprendre <b>ta</b> façon de parler : ta voix, ton ton habituel, ton temps de réponse… puis comment tu réagis quand tu mens.</p>
-          <p class="muted small">≈ 3 minutes · endroit calme · parle normalement, à 30-50 cm de l'appareil.</p>
+          <p class="muted small">≈ 4 minutes · endroit calme · parle normalement, à 30-50 cm de l'appareil.</p>
+          <p class="small">🎭 Chaque question revient deux fois : une fois tu dis la vérité, une fois tu mens. <b>Mens sérieusement</b>, comme pour tromper quelqu'un : plus tes mensonges de calibrage ressemblent à ceux d'une vraie partie, plus la machine sera redoutable.</p>
           <label class="check"><input type="checkbox" id="cam" ${W.camera ? 'checked' : ''}> Utiliser aussi la caméra (pouls estimé & agitation)</label>
           <p class="muted small">La caméra est facultative. Les images ne quittent pas l'appareil : seules la couleur moyenne du visage et la quantité de mouvement sont mesurées.</p>
           <button class="primary big" id="go">Commencer</button>
@@ -588,6 +599,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
         if (!alive()) return;
         if (!res) return show('step');
         if (!res.audio.speech_detected) { toast('Je n\'ai rien entendu… recommence plus près du micro.', true); return show('step'); }
+        if (answer && res.audio.duration_s < 0.4) { toast('Réponse trop brève : réponds par une vraie phrase.', true); return show('step'); }
         W.takes.push({ kind: st.kind, audio: res.audio, video: res.video });
         W.i++;
         fx.play('vote');
@@ -611,6 +623,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
           <section class="card hero">
             <div class="logo">✅</div>
             <h3>Profil calibré !</h3>
+            ${reliabilityCard(p)}
             <p class="muted small">Ta carte d'identité vocale :</p>
             ${idCard(p)}
             <p class="small muted">${W.takes.length} prises${p.has_voice ? ' · empreinte vocale enregistrée' : ''}. La machine continuera d'apprendre à chaque manche jouée.</p>

@@ -117,21 +117,79 @@ pub struct CalibStep {
     pub prompt: &'static str,
 }
 
-/// Protocole de calibrage : alterne vérités et mensonges imposés pour que la
-/// machine apprenne comment *ce* joueur réagit.
+/// Questions ouvertes du calibrage, posées deux fois : une fois en disant la vérité,
+/// une fois en mentant.
+const CALIB_PAIRS: [&str; 6] = [
+    "Qu'as-tu mangé à ton dernier repas ?",
+    "Où as-tu passé tes dernières vacances ?",
+    "Que faisais-tu hier à cette heure-ci ?",
+    "Quel est ton film préféré, et pourquoi ?",
+    "Quel métier rêvais-tu de faire enfant ?",
+    "Comment s'est passée ta dernière soirée entre amis ?",
+];
+
+const TRUTH_INSTRUCTION: &str = "Réponds en disant LA VÉRITÉ, en une ou deux phrases.";
+const LIE_INSTRUCTION: &str = "MENS de façon crédible : invente des détails, comme si tu voulais vraiment convaincre.";
+
+/// Protocole de calibrage.
+///
+/// Chaque question est posée deux fois, en vérité et en mensonge : la différence entre
+/// les deux réponses tient alors au mensonge et non au contenu de la question (une
+/// question longue ou difficile ralentit tout le monde). Les deux passages sont séparés
+/// et l'ordre est contrebalancé (la moitié des questions commence par le mensonge), car
+/// on répond toujours plus vite la deuxième fois à une question déjà entendue.
 pub fn calibration_steps() -> Vec<CalibStep> {
+    use rand::seq::SliceRandom;
     use CalibKind::*;
-    vec![
+    let mut rng = rand::thread_rng();
+    let mut steps = vec![
         CalibStep { kind: Voice, instruction: "Lis cette phrase à voix haute, naturellement.", prompt: "Le soleil se lève à l'est et se couche à l'ouest, comme chaque jour." },
         CalibStep { kind: Voice, instruction: "Lis cette phrase à voix haute.", prompt: "Mon voisin promène son chien tous les matins avant le petit-déjeuner." },
         CalibStep { kind: Neutral, instruction: "Compte calmement de un à huit.", prompt: "1, 2, 3, 4, 5, 6, 7, 8" },
-        CalibStep { kind: Truth, instruction: "Réponds en disant LA VÉRITÉ.", prompt: "Quel est ton prénom ?" },
-        CalibStep { kind: Lie, instruction: "Réponds par un MENSONGE crédible.", prompt: "Dans quelle ville es-tu né ?" },
-        CalibStep { kind: Truth, instruction: "Réponds en disant LA VÉRITÉ.", prompt: "Qu'as-tu mangé à ton dernier repas ?" },
-        CalibStep { kind: Lie, instruction: "Réponds par un MENSONGE crédible.", prompt: "Quel âge as-tu ?" },
-        CalibStep { kind: Truth, instruction: "Réponds en disant LA VÉRITÉ.", prompt: "De quelle couleur est le haut que tu portes ?" },
-        CalibStep { kind: Lie, instruction: "Réponds par un MENSONGE crédible.", prompt: "As-tu des frères ou des sœurs ? Lesquels ?" },
-        CalibStep { kind: Truth, instruction: "Réponds en disant LA VÉRITÉ.", prompt: "Quel temps fait-il dehors aujourd'hui ?" },
-        CalibStep { kind: Lie, instruction: "Réponds par un MENSONGE crédible.", prompt: "Quel est ton métier ou tes études ?" },
-    ]
+    ];
+    let mut order: Vec<usize> = (0..CALIB_PAIRS.len()).collect();
+    order.shuffle(&mut rng);
+    // Moitié des questions : mensonge d'abord.
+    let lie_first: Vec<bool> = order.iter().enumerate().map(|(i, _)| i % 2 == 0).collect();
+    let step = |q: usize, lie: bool| CalibStep {
+        kind: if lie { Lie } else { Truth },
+        instruction: if lie { LIE_INSTRUCTION } else { TRUTH_INSTRUCTION },
+        prompt: CALIB_PAIRS[q],
+    };
+    for (i, &q) in order.iter().enumerate() {
+        steps.push(step(q, lie_first[i]));
+    }
+    let mut second: Vec<usize> = (0..order.len()).collect();
+    second.shuffle(&mut rng);
+    // Jamais deux fois de suite la même question.
+    if second.len() > 1 && second[0] == order.len() - 1 {
+        second.swap(0, 1);
+    }
+    for i in second {
+        steps.push(step(order[i], !lie_first[i]));
+    }
+    steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibration_is_paired_and_counterbalanced() {
+        for _ in 0..20 {
+            let steps = calibration_steps();
+            let answers: Vec<_> = steps.iter().filter(|s| matches!(s.kind, CalibKind::Truth | CalibKind::Lie)).collect();
+            assert_eq!(answers.len(), 2 * CALIB_PAIRS.len());
+            for q in CALIB_PAIRS {
+                let kinds: Vec<_> = answers.iter().filter(|s| s.prompt == q).map(|s| s.kind).collect();
+                assert_eq!(kinds.len(), 2, "{q}");
+                assert_ne!(kinds[0], kinds[1], "une vérité et un mensonge pour {q}");
+            }
+            let first_half = &answers[..CALIB_PAIRS.len()];
+            assert_eq!(first_half.iter().filter(|s| s.kind == CalibKind::Lie).count(), CALIB_PAIRS.len() / 2, "ordre contrebalancé");
+            // Les deux passages d'une même question ne se suivent jamais directement.
+            assert!(answers.windows(2).all(|w| w[0].prompt != w[1].prompt));
+        }
+    }
 }

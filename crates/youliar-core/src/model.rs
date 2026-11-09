@@ -12,6 +12,7 @@
 //! de stress et d'écart à l'habitude. C'est un jeu.
 
 use crate::audio::{AudioFeatures, N_MFCC};
+use crate::questions::CalibKind;
 use crate::video::VideoFeatures;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -142,6 +143,131 @@ pub struct PlayerProfile {
     pub answers_learned: u32,
     #[serde(default)]
     pub stats: PlayerStats,
+    /// Taux de bonnes réponses du modèle en validation croisée sur les réponses connues.
+    #[serde(default)]
+    pub reliability: Option<f32>,
+}
+
+/// Une prise du calibrage, telle que l'interface la transmet.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CalibTake {
+    pub kind: CalibKind,
+    pub audio: AudioFeatures,
+    pub video: Option<VideoFeatures>,
+}
+
+/// Ce que l'interface a besoin de savoir d'un profil (sans les données d'apprentissage).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub avatar: String,
+    pub calibrated: bool,
+    pub camera_calibrated: bool,
+    pub resting_hr: Option<f32>,
+    pub answers_learned: u32,
+    pub has_voice: bool,
+    pub traits: Traits,
+    pub stats: PlayerStats,
+    pub reliability: Option<f32>,
+    /// Indices qui trahissent le plus ce joueur quand il ment.
+    pub tells: Vec<String>,
+}
+
+impl From<&PlayerProfile> for ProfileSummary {
+    fn from(p: &PlayerProfile) -> Self {
+        Self {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            avatar: p.avatar.clone(),
+            calibrated: p.calibrated,
+            camera_calibrated: p.camera_calibrated,
+            resting_hr: p.resting_hr,
+            answers_learned: p.answers_learned,
+            has_voice: p.voice.is_some(),
+            traits: p.traits(),
+            stats: p.stats.clone(),
+            reliability: p.reliability,
+            tells: p.tells(),
+        }
+    }
+}
+
+/// Poids et biais d'un modèle logistique, appliqués à une ligne de base donnée.
+#[derive(Debug, Clone)]
+struct Model {
+    weights: BTreeMap<String, f32>,
+    bias: f32,
+}
+
+/// Forces de rappel vers les a priori essayées en validation croisée : de « on garde les
+/// a priori » (50) à « on fait confiance aux données » (0.1).
+const LAMBDAS: [f32; 4] = [50.0, 2.0, 0.5, 0.1];
+const TRAIN_STEPS: usize = 250;
+
+fn median(v: &mut [f32]) -> f32 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) }
+}
+
+impl Model {
+    fn prior() -> Self {
+        Self { weights: FEATURES.iter().map(|f| (f.key.to_string(), f.prior)).collect(), bias: -1.0 }
+    }
+
+    fn z(baseline: &BTreeMap<String, Stat>, m: &Measures) -> Vec<(&'static FeatureDef, f32)> {
+        FEATURES
+            .iter()
+            .filter_map(|f| {
+                let x = m.get(f.key)?;
+                let st = baseline.get(f.key)?;
+                Some((f, ((x - st.mean) / st.std.max(f.std_floor)).clamp(-3.0, 3.0)))
+            })
+            .collect()
+    }
+
+    /// Logit, contributions individuelles et norme des poids présents.
+    fn logit(&self, baseline: &BTreeMap<String, Stat>, m: &Measures) -> (f32, Vec<(&'static FeatureDef, f32, f32)>, f32) {
+        let zs = Self::z(baseline, m);
+        let w = |f: &FeatureDef| self.weights.get(f.key).copied().unwrap_or(f.prior);
+        let norm = zs.iter().map(|(f, _)| w(f).powi(2)).sum::<f32>().sqrt().max(0.5);
+        let parts: Vec<_> = zs.iter().map(|(f, z)| (*f, *z, GAIN * w(f) * z / norm)).collect();
+        (self.bias + parts.iter().map(|p| p.2).sum::<f32>(), parts, norm)
+    }
+
+    fn predict(&self, baseline: &BTreeMap<String, Stat>, m: &Measures) -> f32 {
+        sigmoid(self.logit(baseline, m).0)
+    }
+
+    /// Régression logistique ramenée vers les a priori avec la force `lambda`.
+    fn train(baseline: &BTreeMap<String, Stat>, data: &[(&Measures, f32)], lambda: f32) -> Self {
+        let mut model = Self::prior();
+        if data.is_empty() {
+            return model;
+        }
+        let n = data.len() as f32;
+        let lr = 0.15;
+        for _ in 0..TRAIN_STEPS {
+            let mut grad_w: BTreeMap<&str, f32> = BTreeMap::new();
+            let mut grad_b = 0.0;
+            for (m, y) in data {
+                let (s, parts, norm) = model.logit(baseline, m);
+                let err = sigmoid(s) - y;
+                grad_b += err;
+                for (f, z, _) in parts {
+                    *grad_w.entry(f.key).or_default() += err * GAIN * z / norm;
+                }
+            }
+            model.bias -= lr * (grad_b / n + 0.05 * (model.bias + 1.0));
+            for f in FEATURES {
+                let w = model.weights.get_mut(f.key).unwrap();
+                let g = grad_w.get(f.key).copied().unwrap_or(0.0) / n + lambda * (*w - f.prior);
+                *w = (*w - lr * g).clamp(-2.5, 2.5);
+            }
+        }
+        model
+    }
 }
 
 /// Bilan du joueur face à la machine, toutes parties confondues.
@@ -263,48 +389,37 @@ impl PlayerProfile {
             samples: Vec::new(),
             answers_learned: 0,
             stats: PlayerStats::default(),
+            reliability: None,
         };
         p.reset_weights();
         p
     }
 
     fn reset_weights(&mut self) {
-        self.weights = FEATURES.iter().map(|f| (f.key.to_string(), f.prior)).collect();
-        self.bias = -1.0;
+        let m = Model::prior();
+        self.weights = m.weights;
+        self.bias = m.bias;
     }
 
-    fn z(&self, m: &Measures) -> Vec<(&'static FeatureDef, f32)> {
-        FEATURES
+    fn model(&self) -> Model {
+        Model { weights: self.weights.clone(), bias: self.bias }
+    }
+
+    fn labeled(&self) -> Vec<(&Measures, f32)> {
+        self.samples
             .iter()
-            .filter_map(|f| {
-                let x = m.get(f.key)?;
-                let st = self.baseline.get(f.key)?;
-                Some((f, ((x - st.mean) / st.std.max(f.std_floor)).clamp(-3.0, 3.0)))
+            .filter_map(|s| match s.label {
+                Label::Truth => Some((&s.measures, 0.0)),
+                Label::Lie => Some((&s.measures, 1.0)),
+                Label::Neutral => None,
             })
             .collect()
     }
 
-    /// Logit et contributions individuelles.
-    fn logit(&self, m: &Measures) -> (f32, Vec<(&'static FeatureDef, f32, f32)>, f32) {
-        let zs = self.z(m);
-        let norm = zs
-            .iter()
-            .map(|(f, _)| self.weights.get(f.key).copied().unwrap_or(f.prior).powi(2))
-            .sum::<f32>()
-            .sqrt()
-            .max(0.5);
-        let parts: Vec<_> = zs
-            .iter()
-            .map(|(f, z)| {
-                let w = self.weights.get(f.key).copied().unwrap_or(f.prior);
-                (*f, *z, GAIN * w * z / norm)
-            })
-            .collect();
-        let s = self.bias + parts.iter().map(|p| p.2).sum::<f32>();
-        (s, parts, norm)
-    }
-
     /// Recalcule la ligne de base puis réajuste les poids sur les réponses étiquetées.
+    ///
+    /// Ligne de base robuste : médiane et écart absolu médian (×1,4826), pour qu'une toux
+    /// ou une hésitation isolée pendant le calibrage ne fausse pas tout le profil.
     pub fn rebuild(&mut self) {
         self.baseline.clear();
         for f in FEATURES {
@@ -322,52 +437,147 @@ impl PlayerProfile {
             if vals.is_empty() {
                 continue;
             }
-            let n = vals.len() as f32;
-            let mean = vals.iter().sum::<f32>() / n;
-            let var = if vals.len() > 1 { vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / (n - 1.0) } else { 0.0 };
-            self.baseline.insert(f.key.into(), Stat { mean, std: var.sqrt().max(f.std_floor), n: vals.len() as u32 });
+            let n = vals.len();
+            let center = median(&mut vals);
+            let scale = if n >= 4 {
+                let mut dev: Vec<f32> = vals.iter().map(|v| (v - center).abs()).collect();
+                1.4826 * median(&mut dev)
+            } else if n > 1 {
+                (vals.iter().map(|v| (v - center).powi(2)).sum::<f32>() / (n - 1) as f32).sqrt()
+            } else {
+                0.0
+            };
+            self.baseline.insert(f.key.into(), Stat { mean: center, std: scale.max(f.std_floor), n: n as u32 });
         }
         self.fit();
     }
 
-    /// Régression logistique régularisée vers les a priori (peu de données !).
+    /// Choisit, par validation croisée, à quel point suivre les données plutôt que les a
+    /// priori : avec une douzaine de réponses, un modèle libre apprend surtout le bruit.
+    /// La justesse en validation croisée du réglage retenu devient la fiabilité affichée.
     fn fit(&mut self) {
-        self.reset_weights();
-        let labeled: Vec<(Measures, f32)> = self
-            .samples
-            .iter()
-            .filter_map(|s| match s.label {
-                Label::Truth => Some((s.measures.clone(), 0.0)),
-                Label::Lie => Some((s.measures.clone(), 1.0)),
-                Label::Neutral => None,
-            })
-            .collect();
-        let has_lie = labeled.iter().any(|(_, y)| *y > 0.5);
-        let has_truth = labeled.iter().any(|(_, y)| *y < 0.5);
-        if !(has_lie && has_truth) {
+        let data = self.labeled();
+        let lies = data.iter().filter(|(_, y)| *y > 0.5).count();
+        if data.len() < 4 || lies == 0 || lies == data.len() {
+            let m = Model::train(&self.baseline, &data, LAMBDAS[0]);
+            (self.weights, self.bias, self.reliability) = (m.weights, m.bias, None);
             return;
         }
-        let lambda = 2.0 / labeled.len() as f32;
-        let lr = 0.15;
-        for _ in 0..400 {
-            let mut grad_w: BTreeMap<&str, f32> = BTreeMap::new();
-            let mut grad_b = 0.0;
-            for (m, y) in &labeled {
-                let (s, parts, norm) = self.logit(m);
-                let err = sigmoid(s) - y;
-                grad_b += err;
-                for (f, z, _) in parts {
-                    *grad_w.entry(f.key).or_default() += err * GAIN * z / norm;
+        let k = data.len().min(8);
+        let mut best = (f32::MAX, LAMBDAS[0], 0.0f32);
+        for &lambda in &LAMBDAS {
+            let (mut loss, mut correct) = (0.0f32, 0usize);
+            for fold in 0..k {
+                let train: Vec<_> = data.iter().enumerate().filter(|(i, _)| i % k != fold).map(|(_, d)| *d).collect();
+                let model = Model::train(&self.baseline, &train, lambda);
+                for (_, (m, y)) in data.iter().enumerate().filter(|(i, _)| i % k == fold) {
+                    let p = model.predict(&self.baseline, m).clamp(1e-3, 1.0 - 1e-3);
+                    loss -= y * p.ln() + (1.0 - y) * (1.0 - p).ln();
+                    correct += usize::from((p >= 0.5) == (*y > 0.5));
                 }
             }
-            let n = labeled.len() as f32;
-            self.bias -= lr * (grad_b / n + 0.05 * (self.bias + 1.0));
-            for f in FEATURES {
-                let w = self.weights.get_mut(f.key).unwrap();
-                let g = grad_w.get(f.key).copied().unwrap_or(0.0) / n + lambda * (*w - f.prior);
-                *w = (*w - lr * g).clamp(-2.5, 2.5);
+            if loss < best.0 {
+                best = (loss, lambda, correct as f32 / data.len() as f32);
             }
         }
+        let m = Model::train(&self.baseline, &data, best.1);
+        (self.weights, self.bias, self.reliability) = (m.weights, m.bias, Some(best.2));
+    }
+
+    /// Indices qui trahissent ce joueur (poids appris nettement positifs), si le modèle
+    /// est assez fiable pour que ce ne soit pas du bruit.
+    pub fn tells(&self) -> Vec<String> {
+        if self.reliability.is_none_or(|r| r < 0.6) {
+            return vec![];
+        }
+        let mut w: Vec<(&FeatureDef, f32)> = FEATURES
+            .iter()
+            .filter(|f| self.baseline.contains_key(f.key))
+            .map(|f| (f, self.weights.get(f.key).copied().unwrap_or(f.prior)))
+            .filter(|(_, w)| w.abs() >= 0.5)
+            .collect();
+        w.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+        w.iter().take(3).map(|(f, w)| format!("{} : {}", f.label, if *w > 0.0 { f.up } else { f.down })).collect()
+    }
+
+    /// Termine le calibrage à partir des prises guidées de l'interface.
+    pub fn calibrate_from_takes(&mut self, takes: &[CalibTake], resting: Option<&VideoFeatures>) -> Result<(), String> {
+        // Une réponse trop brève (« oui », bruit) ne dit rien du joueur.
+        let usable = |t: &&CalibTake| t.audio.speech_detected && t.audio.duration_s >= 0.4;
+        let answers = takes.iter().filter(usable).filter(|t| matches!(t.kind, CalibKind::Truth | CalibKind::Lie)).count();
+        if answers < 4 {
+            return Err("Pas assez de réponses exploitables : recommence le calibrage dans un endroit calme, en répondant par des phrases complètes.".into());
+        }
+        let samples: Vec<Sample> = takes
+            .iter()
+            .filter(usable)
+            .map(|t| {
+                let mut m = measures(&t.audio, t.video.as_ref());
+                let label = match t.kind {
+                    CalibKind::Voice | CalibKind::Neutral => {
+                        // Lire ou compter n'est pas répondre : latence et durée ne sont pas comparables.
+                        m.remove("latency");
+                        m.remove("duration");
+                        Label::Neutral
+                    }
+                    CalibKind::Truth => Label::Truth,
+                    CalibKind::Lie => Label::Lie,
+                };
+                Sample { measures: m, label }
+            })
+            .collect();
+        let voices: Vec<AudioFeatures> = takes.iter().map(|t| t.audio.clone()).collect();
+        let hrs: Vec<f32> = takes.iter().filter_map(|t| t.video.as_ref()?.heart_rate).collect();
+        let resting_hr = resting.and_then(|v| v.heart_rate).or_else(|| (!hrs.is_empty()).then(|| hrs.iter().sum::<f32>() / hrs.len() as f32));
+        self.calibrate(samples, &voices, resting_hr);
+        if resting.is_some_and(|r| r.duration_s > 3.0) {
+            self.camera_calibrated = true;
+        }
+        Ok(())
+    }
+
+    /// Apprend d'une manche révélée : bilan, modèle et empreinte vocale.
+    pub fn learn_answer(&mut self, audio: &AudioFeatures, video: Option<&VideoFeatures>, lie: bool, machine_correct: bool) {
+        self.record_outcome(lie, machine_correct);
+        self.learn(measures(audio, video), lie);
+        if let Some(v) = self.voice.as_mut() {
+            v.merge(audio);
+        }
+    }
+
+    /// Verdict complet d'une réponse : score corrigé des conditions de la partie en cours
+    /// et vérification de la voix parmi les profils de l'appareil.
+    pub fn verdict_for(&self, audio: &AudioFeatures, video: Option<&VideoFeatures>, others: &[&PlayerProfile], session: &[Measures]) -> Result<Verdict, String> {
+        if !audio.speech_detected {
+            return Err("Aucune voix détectée : parle plus près du micro et recommence.".into());
+        }
+        let mut verdict = self.score_in_session(&measures(audio, video), session);
+        verdict.speaker = identify_speaker(audio, &self.id, others);
+        Ok(verdict)
+    }
+
+    /// Score en tenant compte de la dérive du jour (pièce, distance au micro, lecture ou
+    /// non de la question) : la ligne de base est décalée de l'écart entre les réponses
+    /// déjà données dans cette partie et celles du calibrage, de plus en plus à mesure que
+    /// la partie avance. Les deux ensembles mélangent vérités et mensonges, ce qui évite
+    /// de biaiser la correction.
+    pub fn score_in_session(&self, m: &Measures, session: &[Measures]) -> Verdict {
+        if session.len() < 2 {
+            return self.score(m);
+        }
+        let w = session.len() as f32 / (session.len() as f32 + 4.0);
+        let mut shifted = self.baseline.clone();
+        for f in FEATURES {
+            let mut now: Vec<f32> = session.iter().filter_map(|s| s.get(f.key).copied()).collect();
+            let mut then: Vec<f32> = self.labeled().iter().filter_map(|(s, _)| s.get(f.key).copied()).collect();
+            if now.len() < 2 || then.len() < 2 {
+                continue;
+            }
+            if let Some(st) = shifted.get_mut(f.key) {
+                st.mean += w * (median(&mut now) - median(&mut then));
+            }
+        }
+        self.score_with(&shifted, m)
     }
 
     /// Termine le calibrage avec les prises guidées.
@@ -425,7 +635,11 @@ impl PlayerProfile {
     }
 
     pub fn score(&self, m: &Measures) -> Verdict {
-        let (s, parts, _) = self.logit(m);
+        self.score_with(&self.baseline, m)
+    }
+
+    fn score_with(&self, baseline: &BTreeMap<String, Stat>, m: &Measures) -> Verdict {
+        let (s, parts, _) = self.model().logit(baseline, m);
         let p = sigmoid(s);
         let index = (p * 100.0).round().clamp(0.0, 100.0) as u8;
         let label = match index {
@@ -447,8 +661,12 @@ impl PlayerProfile {
             .collect();
         factors.sort_by(|a, b| b.contribution.abs().partial_cmp(&a.contribution.abs()).unwrap_or(std::cmp::Ordering::Equal));
         factors.truncate(4);
-        let labeled = self.samples.iter().filter(|s| s.label != Label::Neutral).count();
-        let confidence = 0.5 * (parts.len() as f32 / FEATURES.len() as f32) + 0.5 * (labeled.min(20) as f32 / 20.0);
+        let coverage = parts.len() as f32 / FEATURES.len() as f32;
+        // La fiabilité mesurée en validation croisée prime sur le simple nombre d'exemples.
+        let confidence = match self.reliability {
+            Some(r) => 0.3 * coverage + 0.7 * ((r - 0.5) * 2.0).clamp(0.0, 1.0),
+            None => 0.5 * coverage + 0.5 * (self.labeled().len().min(20) as f32 / 20.0),
+        };
         Verdict {
             probability: p,
             index,
@@ -524,6 +742,84 @@ mod tests {
         }
         assert!(p.weights["latency"] < 0.5, "poids {}", p.weights["latency"]);
         assert!(p.score(&m(0.5, 30.5, 0.1)).probability > p.score(&m(1.1, 30.5, 0.1)).probability);
+    }
+
+    /// Joueur simulé : ment avec une latence et une voix légèrement plus hautes, noyées
+    /// dans un bruit réaliste et quelques prises aberrantes.
+    fn simulated(lie: bool, seed: u32) -> Measures {
+        let mut x = seed.wrapping_mul(2_654_435_761);
+        let mut noise = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x % 1000) as f32 / 1000.0 - 0.5
+        };
+        let mut m = Measures::new();
+        let outlier = seed.is_multiple_of(11);
+        m.insert("latency".into(), 0.9 + if lie { 0.45 } else { 0.0 } + 0.5 * noise() + if outlier { 3.0 } else { 0.0 });
+        m.insert("pitch".into(), 30.0 + if lie { 0.8 } else { 0.0 } + 1.2 * noise());
+        m.insert("energy".into(), -22.0 + 3.0 * noise());
+        m.insert("rate".into(), 4.0 + noise());
+        m
+    }
+
+    #[test]
+    fn cross_validation_measures_reliability_and_resists_noise() {
+        let mut p = PlayerProfile::new("a", "A", "x");
+        let samples: Vec<Sample> = (0..14)
+            .map(|i| Sample { measures: simulated(i % 2 == 1, i), label: if i % 2 == 1 { Label::Lie } else { Label::Truth } })
+            .collect();
+        p.calibrate(samples, &[], None);
+        let r = p.reliability.expect("fiabilité mesurée");
+        assert!((0.0..=1.0).contains(&r));
+        // Sur des réponses jamais vues, le modèle fait mieux que le hasard.
+        let correct = (100..160).filter(|&i| (p.score(&simulated(i % 2 == 1, i)).probability >= 0.5) == (i % 2 == 1)).count();
+        assert!(correct >= 38, "{correct}/60");
+
+        // Données sans aucun signal : il doit le reconnaître plutôt qu'inventer des indices.
+        let mut q = PlayerProfile::new("b", "B", "x");
+        let flat: Vec<Sample> = (0..14).map(|i| Sample { measures: simulated(false, i), label: if i % 2 == 1 { Label::Lie } else { Label::Truth } }).collect();
+        q.calibrate(flat, &[], None);
+        assert!(q.reliability.unwrap() < 0.75, "{:?}", q.reliability);
+        assert!(q.tells().is_empty() || q.reliability.unwrap() >= 0.6);
+    }
+
+    #[test]
+    fn robust_baseline_ignores_an_outlier() {
+        let mut p = PlayerProfile::new("a", "A", "x");
+        let mut s: Vec<Sample> = (0..7).map(|i| Sample { measures: m(0.8 + 0.02 * i as f32, 30.0, 0.1), label: Label::Truth }).collect();
+        s.push(Sample { measures: m(9.0, 30.0, 0.1), label: Label::Truth }); // quinte de toux
+        p.calibrate(s, &[], None);
+        let st = &p.baseline["latency"];
+        assert!(st.mean < 1.0 && st.std < 0.5, "{st:?}");
+    }
+
+    #[test]
+    fn session_drift_is_compensated() {
+        let mut p = PlayerProfile::new("a", "A", "x");
+        let samples: Vec<Sample> = (0..12).map(|i| Sample { measures: m(0.8, 30.0 + 0.1 * (i % 3) as f32, 0.1), label: if i % 2 == 1 { Label::Lie } else { Label::Truth } }).collect();
+        p.calibrate(samples, &[], None);
+        // Ce soir, sans lecture à voix haute, toutes les réponses arrivent 2 s plus tard.
+        let tonight: Vec<Measures> = (0..6).map(|_| m(2.8, 30.0, 0.1)).collect();
+        let raw = p.score(&m(2.8, 30.0, 0.1)).probability;
+        let fixed = p.score_in_session(&m(2.8, 30.0, 0.1), &tonight).probability;
+        assert!(fixed < raw, "la dérive commune n'est plus prise pour du stress ({raw} → {fixed})");
+    }
+
+    #[test]
+    fn calibration_takes_are_filtered() {
+        let take = |kind, dur: f32| CalibTake {
+            kind,
+            audio: AudioFeatures { speech_detected: true, duration_s: dur, latency_s: 0.8, voiced_ratio: 0.5, f0_mean_st: 30.0, mfcc: vec![0.0; N_MFCC], ..Default::default() },
+            video: None,
+        };
+        let mut p = PlayerProfile::new("a", "A", "x");
+        let short: Vec<_> = (0..6).map(|i| take(if i % 2 == 0 { CalibKind::Truth } else { CalibKind::Lie }, 0.2)).collect();
+        assert!(p.calibrate_from_takes(&short, None).is_err(), "réponses trop brèves refusées");
+        let ok: Vec<_> = (0..6).map(|i| take(if i % 2 == 0 { CalibKind::Truth } else { CalibKind::Lie }, 1.5)).collect();
+        p.calibrate_from_takes(&ok, None).unwrap();
+        assert!(p.calibrated && p.voice.is_some());
+        assert_eq!(ProfileSummary::from(&p).id, "a");
     }
 
     #[test]
