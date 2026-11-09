@@ -1,0 +1,15 @@
+{
+  "name": "youliar",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Détecteur de mensonges de soirée (Rust + Tauri 2)",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon src-tauri/app-icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
