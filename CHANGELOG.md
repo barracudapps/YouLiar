@@ -6,6 +6,15 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.5.1] — 2026-11-09
+
+### Corrigé
+- Le bouton retour du calibrage ramène bien à l'écran précédent, même pendant la lecture
+  d'une question ou un enregistrement.
+- Halo lumineux : un seul cadre, aligné sur la zone utile de l'écran (sans barre des menus ni
+  Dock) ; la fenêtre de l'app est ramenée à l'intérieur pendant qu'il est allumé, puis remise
+  en place ; plus de second halo dessiné dans la fenêtre sur ordinateur.
+
 ## [0.5.0] — 2026-11-09
 
 ### Ajouté
