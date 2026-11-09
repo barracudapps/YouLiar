@@ -36,7 +36,8 @@ export class EdgeLight {
   hold(on) { this.held = on; }
 
   luma() {
-    const w = this.media.videoWindow(1.5);
+    // Fenêtre de 2 s : même à 5 images/s (cadence de repos), assez d'échantillons.
+    const w = this.media.videoWindow(2, 5);
     if (!w) return null;
     return w.reduce((a, s) => a + 0.299 * s.r + 0.587 * s.g + 0.114 * s.b, 0) / w.length;
   }

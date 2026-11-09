@@ -14,6 +14,9 @@ export class Media {
     this.video = null;
     this.videoSamples = [];
     this._timer = null;
+    this._fps = 30;
+    // Application en arrière-plan : on cesse d'analyser les images.
+    document.addEventListener('visibilitychange', () => this._restartSampler());
   }
 
   get ready() { return !!this.stream; }
@@ -96,7 +99,7 @@ export class Media {
       const dx = (x + .5 - W / 2) / (W * .2), dy = (y + .5 - H / 2) / (H * .35);
       if (dx * dx + dy * dy <= 1) roi.push(y * W + x);
     }
-    this._timer = setInterval(() => {
+    this._sample = () => {
       if (!this.video || this.video.readyState < 2) return;
       g.drawImage(this.video, 0, 0, W, H);
       const px = g.getImageData(0, 0, W, H).data;
@@ -114,15 +117,32 @@ export class Media {
       const t = performance.now() / 1000;
       this.videoSamples.push({ t, r: r / n, g: gg / n, b: b / n, motion });
       while (this.videoSamples.length && this.videoSamples[0].t < t - VIDEO_KEEP_S) this.videoSamples.shift();
-    }, 33);
+    };
+    this._restartSampler();
   }
 
-  /** Échantillons caméra des `seconds` dernières secondes. */
-  videoWindow(seconds) {
+  /**
+   * Cadence d'analyse caméra : 30 i/s quand une mesure compte (pouls), 5 i/s sinon
+   * (luminosité pour le halo) — l'analyse d'image coûte cher en batterie sur mobile.
+   */
+  setRate(fps) {
+    if (fps === this._fps) return;
+    this._fps = fps;
+    this._restartSampler();
+  }
+
+  _restartSampler() {
+    clearInterval(this._timer);
+    this._timer = null;
+    if (this._sample && !document.hidden) this._timer = setInterval(this._sample, Math.round(1000 / (this._fps || 30)));
+  }
+
+  /** Échantillons caméra des `seconds` dernières secondes (au moins `min`). */
+  videoWindow(seconds, min = 11) {
     if (!this.camera) return null;
     const t = performance.now() / 1000;
     const s = this.videoSamples.filter((x) => x.t >= t - seconds);
-    return s.length > 10 ? s : null;
+    return s.length >= min ? s : null;
   }
 
   /** Attache un aperçu caméra dans `el`. */
@@ -171,6 +191,7 @@ export class Media {
   stop() {
     clearInterval(this._timer);
     this._timer = null;
+    this._sample = null;
     this.recording = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.ctx?.close().catch(() => {});
