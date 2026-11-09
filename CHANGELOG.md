@@ -6,6 +6,13 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.5.0] — 2026-11-09
+
+### Ajouté
+- **Halo lumineux** quand le visage est trop sombre pour la caméra : bandes blanches sur les
+  bords de l'écran (ordinateur) ou cadre lumineux dans l'interface (mobile). Modes Auto,
+  Toujours, Jamais, réglables dans le salon et au calibrage caméra.
+
 ## [0.4.0] — 2026-11-09
 
 ### Ajouté
