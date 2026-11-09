@@ -7,4 +7,5 @@ pub mod model;
 pub mod protocol;
 pub mod questions;
 pub mod secure;
+pub mod themes;
 pub mod video;

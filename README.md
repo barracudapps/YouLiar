@@ -80,6 +80,14 @@ pendant ~35 s ; le joueur retrouve sa place dans la partie.
 
 Le mode se choisit dans le salon (par l'hôte), en local comme en réseau.
 
+**Histoires** (mode jeu et mode libre) : 🪆 agent du KGB, 🕶️ espion de la CIA, 🎬 star de
+cinéma, 🔎 meurtre au manoir, 🏴‍☠️ mutinerie à bord. Un prologue lu à voix haute ouvre la
+partie, des chapitres font avancer l'intrigue (répartis sur toutes les manches, dénouement à
+la dernière), les questions se jouent dans la peau de son personnage, les consignes et les
+verdicts prennent le vocabulaire de l'histoire, et l'épilogue attribue un grade à chacun
+selon le classement. Les textes sont dans `crates/youliar-core/src/themes.rs` ; seul
+l'identifiant de l'histoire circule sur le réseau.
+
 **Rejoindre** : scanner le QR code affiché par l'hôte (caméra de l'appareil qui rejoint,
 décodage local), choisir une partie détectée sur le réseau, ou saisir l'adresse et le code.
 

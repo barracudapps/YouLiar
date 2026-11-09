@@ -86,6 +86,13 @@ pub struct Settings {
     /// Temps de vote en secondes (0 = illimité). Au-delà, la révélation est automatique.
     #[serde(default = "default_vote_seconds")]
     pub vote_seconds: u32,
+    /// Histoire qui habille la partie (`themes.rs`), ou « classic ».
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    crate::themes::CLASSIC.into()
 }
 
 fn default_vote_seconds() -> u32 {
@@ -97,7 +104,7 @@ pub const MAX_USED_QUESTIONS: usize = 500;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { game_name: "Partie YouLiar".into(), mode: GameMode::Game, rounds_per_player: 2, instruction_mode: InstructionMode::Assigned, pack: Pack::Soft, read_aloud: true, vote_seconds: default_vote_seconds() }
+        Self { game_name: "Partie YouLiar".into(), mode: GameMode::Game, rounds_per_player: 2, instruction_mode: InstructionMode::Assigned, pack: Pack::Soft, read_aloud: true, vote_seconds: default_vote_seconds(), theme: default_theme() }
     }
 }
 
@@ -318,7 +325,11 @@ impl Game {
     }
 
     fn pick_question(&mut self) -> String {
-        let bank = questions_for(self.settings.pack);
+        // Une histoire apporte ses propres questions, à jouer dans le rôle.
+        let bank = match crate::themes::theme(&self.settings.theme) {
+            Some(t) => t.questions.to_vec(),
+            None => questions_for(self.settings.pack),
+        };
         let fresh: Vec<&str> = bank.iter().copied().filter(|q| !self.used.iter().any(|u| u == q)).collect();
         let q = if fresh.is_empty() {
             self.used.clear();
@@ -501,6 +512,9 @@ impl Game {
                 let mut s = settings;
                 s.rounds_per_player = s.rounds_per_player.clamp(1, 10);
                 s.vote_seconds = s.vote_seconds.min(120);
+                if crate::themes::theme(&s.theme).is_none() {
+                    s.theme = default_theme();
+                }
                 s.game_name = s.game_name.trim().chars().filter(|c| !c.is_control()).take(40).collect();
                 if s.game_name.is_empty() {
                     s.game_name = Settings::default().game_name;
@@ -859,6 +873,20 @@ mod tests {
         g.device_left("d2");
         assert_eq!(g.stage, Stage::Asking);
         assert_eq!(g.round.as_ref().unwrap().subject, "a");
+    }
+
+    #[test]
+    fn story_theme_brings_its_own_questions() {
+        let mut g = Game::new(StdRng::seed_from_u64(4));
+        let mut s = Settings { theme: "inconnu".into(), ..Settings::default() };
+        g.apply(HOST_DEVICE, Action::UpdateSettings { settings: s.clone() }).unwrap();
+        assert_eq!(g.settings.theme, "classic", "thème inconnu ramené au classique");
+        s.theme = "pirate".into();
+        g.apply(HOST_DEVICE, Action::UpdateSettings { settings: s }).unwrap();
+        g.apply(HOST_DEVICE, Action::AddPlayers { players: vec![info("a"), info("b")] }).unwrap();
+        g.apply(HOST_DEVICE, Action::Start).unwrap();
+        let pirate = crate::themes::theme("pirate").unwrap();
+        assert!(g.round.as_ref().unwrap().choices.iter().all(|q| pirate.questions.contains(&q.as_str())));
     }
 
     #[test]

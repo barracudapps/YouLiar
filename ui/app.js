@@ -18,6 +18,7 @@ const light = new EdgeLight(media, {
 });
 const S = {
   screen: 'home',
+  themes: [],
   profiles: [],
   view: null,
   session: { mode: 'none' },
@@ -67,6 +68,46 @@ const isMine = (id) => !!id && !!playerById(id)?.mine;
 
 async function loadProfiles() { S.profiles = await call('profiles_list'); }
 
+// ---------- Histoires ----------
+
+const themeOf = (v) => S.themes?.find((t) => t.id === v?.settings.theme) ?? null;
+
+/** Remplace {subject}, {asker}, {winner} par les prénoms (texte échappé). */
+function fill(text, names = {}) {
+  return esc(text).replace(/\{(subject|asker|winner)\}/g, (_, k) => names[k] ?? '');
+}
+
+/** Même découpage que le cœur : le récit s'étale sur toute la partie. */
+function chapterIndex(t, round, total) {
+  if (!round || !t.chapters.length) return null;
+  const n = t.chapters.length;
+  return Math.min(n - 1, Math.floor(((round - 1) * n) / Math.max(total, round)));
+}
+
+/** Grade d'après la place (0 = premier) parmi `count` joueurs. */
+function rankTitle(t, place, count) {
+  const top = t.ranks.length - 1;
+  return t.ranks[count <= 1 ? top : Math.round(((count - 1 - place) / (count - 1)) * top)];
+}
+
+/** Réaction du récit au verdict, selon la vérité et la justesse de la machine. */
+function storyLine(t, lie, machineCorrect) {
+  if (lie) return machineCorrect ? t.liar_caught : t.liar_escaped;
+  return machineCorrect ? t.honest_cleared : t.honest_accused;
+}
+
+/** L'hôte lit le récit une seule fois par étape (s'il fait lire les questions). */
+function narrate(v, key, text) {
+  if (!v.is_host || !v.settings.read_aloud || S.narrated === key) return;
+  S.narrated = key;
+  speak(text);
+}
+
+function applyThemeColors() {
+  const t = S.screen === 'game' ? themeOf(S.view) : null;
+  document.body.dataset.theme = t ? t.id : '';
+}
+
 function go(screen, params = {}) {
   if (S.screen === 'join' && screen !== 'join') { call('discovery_stop').catch(() => {}); stopScanner(); }
   S.screen = screen;
@@ -75,6 +116,7 @@ function go(screen, params = {}) {
   backBtn.hidden = screen === 'home';
   keepAwake(screen === 'game' || screen === 'calibrate');
   render();
+  applyThemeColors();
   window.scrollTo(0, 0);
 }
 
@@ -276,6 +318,10 @@ SCREENS.rules = () => {
       <div><span>🎙️</span><p><b>Réponse à voix haute.</b> Tout le monde voit l'aiguille du polygraphe s'agiter en direct.</p></div>
       <div><span>🗳️</span><p><b>Vote.</b> Mensonge ou vérité ? Tu peux parier « sûr de moi » pour doubler la mise.</p></div>
       <div><span>🤖</span><p><b>Verdict</b> de la machine, puis la vérité éclate.</p></div>
+    </section>
+    <section class="card">
+      <h3>📖 Les histoires</h3>
+      <p>Choisis une histoire dans le salon : <b>agent du KGB</b>, <b>espion de la CIA</b>, <b>star de cinéma</b>, <b>meurtre au manoir</b> ou <b>mutinerie à bord</b>. Un prologue ouvre la partie, un nouveau chapitre fait avancer l'intrigue au fil des manches, les questions se jouent dans la peau de ton personnage, et l'épilogue distribue les grades.</p>
     </section>
     <section class="card">
       <h3>🎤 Le mode libre</h3>
@@ -787,6 +833,7 @@ function renderGame(force = false) {
       <div class="row small muted"><span class="grow">Manche ${v.round_no} / ${v.total_rounds}</span><span title="Verdicts justes de la machine">🤖 ${v.machine.correct}/${v.machine.total}</span></div>
     </div>` : '';
 
+  applyThemeColors();
   app.innerHTML = header + STAGES[v.stage](v, r, mineSubject);
   bindCommon();
   STAGES_BIND[v.stage]?.(v, r, mineSubject);
@@ -837,6 +884,12 @@ const STAGES = {
         <button role="radio" aria-checked="${free}" class="mode ${free ? 'sel' : ''}" data-gmode="free" ${host ? '' : 'disabled'}>
           <span>🎤</span><b>Libre</b><small>Chacun pose les questions qu'il veut, à qui il veut</small></button>
       </section>
+      <section class="card"><h3>📖 Histoire</h3>
+        <div class="stories" role="radiogroup" aria-label="Histoire">${[{ id: 'classic', emoji: '🎲', name: 'Classique', tagline: 'Sans histoire : les questions du paquet choisi.' }, ...S.themes].map((t) => `
+          <button role="radio" aria-checked="${s.theme === t.id}" class="story ${s.theme === t.id ? 'sel' : ''}" data-story="${esc(t.id)}" ${host ? '' : 'disabled'}>
+            <span>${esc(t.emoji)}</span><b>${esc(t.name)}</b><small>${esc(t.tagline)}</small></button>`).join('')}</div>
+        ${themeOf(v) ? `<p class="small muted">${esc(themeOf(v).prologue)}</p>` : ''}
+      </section>
       ${net ? `<section class="card center">
           <div class="qr" id="qr" aria-label="QR code pour rejoindre la partie"></div>
           <p class="muted small">Scanne ce QR code depuis « Rejoindre une partie », ou saisis le code :</p>
@@ -862,8 +915,8 @@ const STAGES = {
             <button role="radio" data-mode="free" class="${s.instruction_mode === 'free' ? 'sel' : ''}" ${host ? '' : 'disabled'}>🤔 Libre choix</button></div></div>
         <div class="field"><span>Temps de vote</span>
           <div class="seg" role="radiogroup">${[[15, '15 s'], [30, '30 s'], [60, '60 s'], [0, '∞']].map(([n, l]) => `<button role="radio" aria-checked="${n === (s.vote_seconds ?? 30)}" class="${n === (s.vote_seconds ?? 30) ? 'sel' : ''}" data-vsecs="${n}" ${host ? '' : 'disabled'}>${l}</button>`).join('')}</div></div>`}
-        <div class="field"><span>${free ? 'Idées de questions' : 'Questions'}</span>
-          <div class="seg wrap" role="radiogroup">${Object.entries(PACKS).map(([k, l]) => `<button role="radio" data-pack="${k}" class="${s.pack === k ? 'sel' : ''}" ${host ? '' : 'disabled'}>${l}</button>`).join('')}</div></div>
+        ${themeOf(v) ? '' : `<div class="field"><span>${free ? 'Idées de questions' : 'Questions'}</span>
+          <div class="seg wrap" role="radiogroup">${Object.entries(PACKS).map(([k, l]) => `<button role="radio" data-pack="${k}" class="${s.pack === k ? 'sel' : ''}" ${host ? '' : 'disabled'}>${l}</button>`).join('')}</div></div>`}
         <label class="check"><input type="checkbox" id="aloud" ${s.read_aloud ? 'checked' : ''} ${host ? '' : 'disabled'}> La machine lit les questions à voix haute</label>
         <label class="check"><input type="checkbox" id="cam" ${S.useCamera ? 'checked' : ''}> Caméra sur cet appareil</label>
         ${S.useCamera ? lightControl(light.mode) : ''}
@@ -880,7 +933,9 @@ const STAGES = {
     const mineP = v.players.filter((p) => p.mine);
     const target = S.freeTarget && players.some((p) => p.id === S.freeTarget) ? S.freeTarget : null;
     const recent = [...v.history].reverse().slice(0, 8);
+    const t = themeOf(v);
     return `
+      ${t ? `<details class="card story-card" ${v.round_no ? '' : 'open'}><summary>${esc(t.emoji)} ${esc(t.name)} — prologue</summary><p>${esc(t.prologue)}</p></details>` : ''}
       <section class="card">
         <h3>🎯 Qui interroger ?</h3>
         <div class="targets">${players.map((p) => `<button class="target ${p.id === target ? 'sel' : ''}" data-target="${esc(p.id)}" aria-pressed="${p.id === target}">
@@ -900,12 +955,15 @@ const STAGES = {
   },
 
   asking(v, r, mine) {
+    const t = themeOf(v);
+    const names = { subject: `<b>${nameOf(r.subject)}</b>`, asker: `<b>${nameOf(r.asker)}</b>` };
+    const summon = t ? `<p class="summon">${fill(r.asker ? t.summon : t.summon_solo, names)}</p>` : '';
     if (v.settings.mode === 'free') {
       return `
         <section class="card versus">
-          <div><span class="avatar big">${esc(playerById(r.subject)?.avatar)}</span><b>${nameOf(r.subject)}</b><small>🔥 interrogé(e)</small></div>
-          ${r.asker ? `<div class="vs">←</div><div><span class="avatar big">${esc(playerById(r.asker)?.avatar)}</span><b>${nameOf(r.asker)}</b><small>🎤 demande</small></div>` : ''}
-        </section>
+          <div><span class="avatar big">${esc(playerById(r.subject)?.avatar)}</span><b>${nameOf(r.subject)}</b><small>🔥 ${t ? esc(t.subject_role) : 'interrogé(e)'}</small></div>
+          ${r.asker ? `<div class="vs">←</div><div><span class="avatar big">${esc(playerById(r.asker)?.avatar)}</span><b>${nameOf(r.asker)}</b><small>🎤 ${t ? esc(t.asker_role) : 'demande'}</small></div>` : ''}
+        </section>${summon}
         <section class="card question-card"><p class="question">${esc(r.question)}</p></section>
         ${mine ? `<p class="center muted small">Mens ou dis la vérité : c'est toi qui décides. Tu pourras avouer après le verdict… ou pas.</p>
           <div class="sticky-cta"><button class="primary big full" id="answer">🎙️ ${nameOf(r.subject)} répond</button></div>`
@@ -916,10 +974,15 @@ const STAGES = {
     const subj = playerById(r.subject);
     const shared = v.players.filter((p) => p.mine).length > 1;
     const chooser = r.asker ? isMine(r.asker) : mine;
-    const who = `<section class="card versus">
-        <div><span class="avatar big">${esc(subj?.avatar)}</span><b>${nameOf(r.subject)}</b><small>🔥 sur la sellette</small></div>
-        ${r.asker ? `<div class="vs">VS</div><div><span class="avatar big">${esc(playerById(r.asker)?.avatar)}</span><b>${nameOf(r.asker)}</b><small>🎤 interrogateur</small></div>` : ''}
-      </section>`;
+    const idx = t ? chapterIndex(t, v.round_no, v.total_rounds) : null;
+    const chapter = idx == null ? '' : `<section class="card story-card">
+        ${v.round_no === 1 ? `<p class="prologue">${esc(t.prologue)}</p>` : ''}
+        <p class="chapter-title">${esc(t.emoji)} Chapitre ${idx + 1} — ${esc(t.chapters[idx].title)}</p>
+        <p>${esc(t.chapters[idx].text)}</p></section>`;
+    const who = `${chapter}<section class="card versus">
+        <div><span class="avatar big">${esc(subj?.avatar)}</span><b>${nameOf(r.subject)}</b><small>🔥 ${t ? esc(t.subject_role) : 'sur la sellette'}</small></div>
+        ${r.asker ? `<div class="vs">VS</div><div><span class="avatar big">${esc(playerById(r.asker)?.avatar)}</span><b>${nameOf(r.asker)}</b><small>🎤 ${t ? esc(t.asker_role) : 'interrogateur'}</small></div>` : ''}
+      </section>${summon}`;
 
     if (!r.question_locked) {
       return `${who}
@@ -986,12 +1049,13 @@ const STAGES = {
     return `
       <section class="card">
         <p class="center muted">« ${esc(r.question)} » — ${pname(r.subject)}</p>
-        <p class="center muted small">Indice de mensonge de la machine</p>
+        <p class="center muted small">Verdict de ${themeOf(v) ? esc(themeOf(v).machine) : 'la machine'}</p>
         <div id="gauge">${gauge(vd.index, { scanning: animate })}</div>
         <p class="verdict-label ${animate ? 'later' : ''}" id="vlabel" style="color:${gaugeColor(vd.index)}">🤖 « ${esc(vd.label)} »</p>
       </section>
       <div class="truth-banner ${r.lie ? 'lie' : 'truth'} ${animate ? 'later' : ''}" id="tbanner">${r.lie ? '🤥 ' + esc(subj?.name) + ' MENTAIT !' : '😇 ' + esc(subj?.name) + ' disait la VÉRITÉ'}
-        <small>${o.machine_correct ? '🎯 La machine avait vu juste' : `🤖💥 La machine s'est fait berner ! +2 pour ${esc(subj?.name)}`}</small></div>
+        <small>${o.machine_correct ? '🎯 La machine avait vu juste' : `🤖💥 La machine s'est fait berner ! +2 pour ${esc(subj?.name)}`}</small>
+        ${themeOf(v) ? `<p class="story-line">📖 ${esc(storyLine(themeOf(v), r.lie, o.machine_correct))}</p>` : ''}</div>
       <div class="${animate ? 'later' : ''}" id="details">
         ${vd.speaker && !vd.speaker.matched ? `<p class="center warn card">🕵️ Bizarre… cette voix ressemblait plutôt à celle de ${esc(vd.speaker.best_name)} !</p>` : ''}
         <section class="card"><h3>Ce qui a trahi (ou pas) ${esc(subj?.name)}</h3>
@@ -1021,10 +1085,15 @@ const STAGES = {
     const acc = v.machine.total ? Math.round((v.machine.correct / v.machine.total) * 100) : 0;
     const podium = [ranking[1], ranking[0], ranking[2]];
     const aw = awards(v);
+    const t = themeOf(v);
+    const epilogue = t && ranking[0] ? `<section class="card story-card"><p class="chapter-title">${esc(t.emoji)} Épilogue</p>
+        <p>${fill(t.epilogue, { winner: `<b>${esc(ranking[0].name)}</b>` })}</p>
+        <div class="ranks">${ranking.map((p, i) => `<div><span>${esc(p.avatar)} ${esc(p.name)}</span><b>${esc(rankTitle(t, i, ranking.length))}</b></div>`).join('')}</div></section>` : '';
     return `
       <section class="card hero"><div class="logo">🏆</div><h2>${ranking[0] ? esc(ranking[0].name) + ' gagne !' : 'Partie terminée'}</h2>
         <div class="podium">${podium.map((p, i) => p ? `<div class="p${[2, 1, 3][i]}"><span class="avatar big">${esc(p.avatar)}</span><b>${esc(p.name)}</b><span class="score">${p.score}</span><div class="step">${[2, 1, 3][i]}</div></div>` : '<div></div>').join('')}</div>
       </section>
+      ${epilogue}
       ${aw.length ? `<section class="card"><h3>🎖️ Trophées</h3><div class="awards">${aw.map((a) => `<div><span>${a.icon}</span><b>${esc(a.title)}</b><small>${pname(a.player)} · ${esc(a.why)}</small></div>`).join('')}</div></section>` : ''}
       <section class="card center"><p>🤖 La machine a vu juste <b>${v.machine.correct}</b> fois sur <b>${v.machine.total}</b> (${acc} %).</p>
         <p class="muted small">${acc >= 60 ? 'Elle commence à bien vous connaître…' : 'Vous êtes de sacrés comédiens !'} Plus vous jouez, plus elle apprend vos tics.</p></section>
@@ -1056,7 +1125,8 @@ function freeReveal(v, r, mine) {
     </section>
     <div class="${animate ? 'later' : ''}" id="details">
       ${confessed ? `<div class="truth-banner ${r.lie ? 'lie' : 'truth'}">${r.lie ? '🤥 ' + esc(subj?.name) + ' avoue avoir menti !' : '😇 ' + esc(subj?.name) + ' jure avoir dit vrai'}
-          <small>${r.outcome?.machine_correct ? '🎯 La machine avait vu juste' : "🤖💥 La machine s'est fait berner !"}</small></div>`
+          <small>${r.outcome?.machine_correct ? '🎯 La machine avait vu juste' : "🤖💥 La machine s'est fait berner !"}</small>
+          ${themeOf(v) ? `<p class="story-line">📖 ${esc(storyLine(themeOf(v), r.lie, !!r.outcome?.machine_correct))}</p>` : ''}</div>`
         : mine ? `<section class="card"><h3>Alors, ${esc(subj?.name)}… tu avoues ?</h3>
             <p class="muted small">Avouer aide la machine à mieux te connaître. Tu peux aussi garder le secret.</p>
             <div class="row"><button class="truth grow" data-confess="false">😇 J'ai dit vrai</button><button class="lie grow" data-confess="true">🤥 J'ai menti</button></div></section>`
@@ -1102,11 +1172,12 @@ function awards(v) {
   return out;
 }
 
-function bindSecret(r) {
+function bindSecret(r, t) {
   const sec = $('#secret');
   if (!sec) return;
   const txt = $('#secret-txt');
-  const show = (e) => { e.preventDefault(); txt.className = 'reveal ' + (r.lie ? 'lie' : 'truth'); txt.textContent = r.lie ? '🤥 MENS !' : '😇 DIS LA VÉRITÉ'; fx.buzz(15); };
+  const order = r.lie ? (t ? t.lie_order : 'MENS !') : (t ? t.truth_order : 'DIS LA VÉRITÉ');
+  const show = (e) => { e.preventDefault(); txt.className = 'reveal ' + (r.lie ? 'lie' : 'truth'); txt.textContent = `${r.lie ? '🤥' : '😇'} ${order}`; fx.buzz(15); };
   const hide = () => { txt.className = 'reveal'; txt.textContent = '👁️ Maintiens appuyé pour voir'; };
   sec.addEventListener('pointerdown', show);
   ['pointerup', 'pointerleave', 'pointercancel', 'blur'].forEach((ev) => sec.addEventListener(ev, hide));
@@ -1117,6 +1188,8 @@ function bindSecret(r) {
 
 const STAGES_BIND = {
   free(v) {
+    const t = themeOf(v);
+    if (t && !v.round_no) narrate(v, 'prologue', t.prologue);
     $$('[data-target]').forEach((b) => (b.onclick = () => { S.freeTarget = b.dataset.target; renderGame(true); }));
     $$('[data-sugg]').forEach((b) => (b.onclick = () => { $('#freeq').value = b.dataset.sugg; $('#freeq').focus(); }));
     $('#moresugg').onclick = () => act({ type: 'new_question' });
@@ -1144,6 +1217,7 @@ const STAGES_BIND = {
     const upd = (patch) => act({ type: 'update_settings', settings: { ...v.settings, ...patch } });
     if (v.is_host) {
       $$('[data-gmode]').forEach((b) => (b.onclick = () => upd({ mode: b.dataset.gmode })));
+      $$('[data-story]').forEach((b) => (b.onclick = () => upd({ theme: b.dataset.story })));
       $$('[data-vsecs]').forEach((b) => (b.onclick = () => upd({ vote_seconds: Number(b.dataset.vsecs) })));
       $$('[data-rounds]').forEach((b) => (b.onclick = () => upd({ rounds_per_player: Number(b.dataset.rounds) })));
       $$('[data-mode]').forEach((b) => (b.onclick = () => upd({ instruction_mode: b.dataset.mode })));
@@ -1168,7 +1242,17 @@ const STAGES_BIND = {
       $('#customq').onkeydown = (e) => { if (e.key === 'Enter') send(); };
     }
     $$('[data-declare]').forEach((b) => (b.onclick = () => act({ type: 'declare', lie: b.dataset.declare === 'true' })));
-    bindSecret(r);
+    bindSecret(r, themeOf(v));
+    // Le récit avance : l'hôte lit le prologue puis chaque nouveau chapitre.
+    const t = themeOf(v);
+    if (t && v.settings.mode !== 'free') {
+      const idx = chapterIndex(t, v.round_no, v.total_rounds);
+      const prevIdx = v.round_no > 1 ? chapterIndex(t, v.round_no - 1, v.total_rounds) : null;
+      if (idx !== prevIdx) {
+        const ch = t.chapters[idx];
+        narrate(v, `ch:${v.round_no}`, `${v.round_no === 1 ? t.prologue + ' ' : ''}Chapitre ${idx + 1}. ${ch.title}. ${ch.text}`);
+      }
+    }
     $('#answer') && ($('#answer').onclick = async () => {
       try { await media.start({ camera: S.useCamera }); await media.resume(); } catch (e) { return toast(e.message, true); }
       act({ type: 'start_answer' });
@@ -1223,7 +1307,14 @@ const STAGES_BIND = {
   },
 
   finished(v) {
-    if (!S.revealed.finished) { S.revealed.finished = true; fx.play('win'); fx.buzz([40, 60, 40, 60, 120]); }
+    if (!S.revealed.finished) {
+      S.revealed.finished = true;
+      fx.play('win');
+      fx.buzz([40, 60, 40, 60, 120]);
+      const t = themeOf(v);
+      const winner = [...v.players].sort((a, b) => b.score - a.score)[0];
+      if (t && winner && v.settings.mode !== 'free') setTimeout(() => narrate(v, 'epilogue', t.epilogue.replace('{winner}', winner.name)), 1500);
+    }
     $('#again') && ($('#again').onclick = () => act({ type: 'back_to_lobby' }));
     $('#quit').onclick = async () => { await leaveSession(); go('home'); };
   },
@@ -1364,6 +1455,7 @@ async function boot() {
   });
   await listen('discovery', (e) => { S.discovered = e.payload; if (S.screen === 'join') renderFound(); });
   await loadProfiles().catch(() => {});
+  S.themes = await call('themes_list').catch(() => []);
   // Reprise après rechargement de la page : la session vit côté Rust.
   const info = await call('session_info').catch(() => ({ mode: 'none' }));
   S.session = info;

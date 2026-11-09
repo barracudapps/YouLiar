@@ -180,6 +180,12 @@ async fn wipe_data(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Histoires disponibles (textes identiques sur tous les appareils).
+#[tauri::command]
+fn themes_list() -> &'static [youliar_core::themes::Theme] {
+    youliar_core::themes::themes()
+}
+
 #[tauri::command]
 fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -514,6 +520,7 @@ pub fn run() {
             profile_update,
             wipe_data,
             app_version,
+            themes_list,
             host_qr,
             scan_qr,
             player_infos,
