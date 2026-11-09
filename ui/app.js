@@ -68,7 +68,7 @@ const isMine = (id) => !!id && !!playerById(id)?.mine;
 async function loadProfiles() { S.profiles = await call('profiles_list'); }
 
 function go(screen, params = {}) {
-  if (S.screen === 'join' && screen !== 'join') call('discovery_stop').catch(() => {});
+  if (S.screen === 'join' && screen !== 'join') { call('discovery_stop').catch(() => {}); stopScanner(); }
   S.screen = screen;
   S.params = params;
   S.flowKey = null;
@@ -94,7 +94,8 @@ backBtn.onclick = async () => {
     media.cancelRecording?.();
     light.hold(false);
   }
-  const back = { calibrate: S.params.returnTo ?? 'profiles', rules: S.params.returnTo ?? 'home' }[S.screen] ?? 'home';
+  const back = { calibrate: S.params.returnTo ?? 'profiles', rules: S.params.returnTo ?? 'home', settings: S.params.returnTo ?? 'home' }[S.screen] ?? 'home';
+  stopScanner();
   go(back);
 };
 
@@ -254,6 +255,7 @@ SCREENS.home = () => {
       <button data-goto="host" ${calibrated ? '' : 'class="dim"'}><span class="emoji">📡</span><span>Créer une partie réseau<small>Mode jeu ou libre · chacun son appareil</small></span></button>
       <button data-goto="join"><span class="emoji">🔗</span><span>Rejoindre une partie<small>Découverte automatique ou adresse IP</small></span></button>
       <button data-goto="profiles"><span class="emoji">🎙️</span><span>Joueurs & calibrage<small>${S.profiles.length} profil(s) · ${calibrated} calibré(s)</small></span></button>
+      <button data-goto="settings"><span class="emoji">⚙️</span><span>Réglages<small>Son, vibrations, caméra, voix, données</small></span></button>
       <button data-goto="rules"><span class="emoji">📖</span><span>Comment jouer<small>Mode jeu, mode libre, points</small></span></button>
     </nav>
     ${DISCLAIMER}`;
@@ -299,6 +301,62 @@ SCREENS.rules = () => {
     ${DISCLAIMER}`;
 };
 
+SCREENS.settings = () => {
+  const synth = window.speechSynthesis;
+  const voices = synth ? synth.getVoices().filter((v) => v.lang?.toLowerCase().startsWith('fr')) : [];
+  if (synth && !voices.length && !S.voicesWaited) {
+    // Les voix arrivent parfois après le premier appel.
+    S.voicesWaited = true;
+    synth.addEventListener?.('voiceschanged', () => { if (S.screen === 'settings') render(); }, { once: true });
+  }
+  const voice = pref('voice', '');
+  const rate = Number(pref('rate', '1')) || 1;
+  app.innerHTML = `
+    <h2>⚙️ Réglages</h2>
+    <section class="card"><h3>Sons et vibrations</h3>
+      <label class="check"><input type="checkbox" id="snd" ${fx.muted ? '' : 'checked'}> Effets sonores</label>
+      <label class="check"><input type="checkbox" id="hap" ${fx.haptics ? 'checked' : ''}> Vibrations (mobile)</label>
+    </section>
+    <section class="card"><h3>Caméra</h3>
+      <label class="check"><input type="checkbox" id="cam" ${S.useCamera ? 'checked' : ''}> Utiliser la caméra par défaut (pouls estimé, agitation)</label>
+      ${lightControl(light.mode)}
+    </section>
+    <section class="card"><h3>Voix de la machine</h3>
+      ${synth ? `<label class="field"><span>Voix</span><select id="voice">
+          <option value="">Par défaut</option>${voices.map((v) => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === voice ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select></label>
+        <label class="field"><span>Vitesse : <b id="ratev">${rate.toFixed(1)}×</b></span><input type="range" id="rate" min="0.7" max="1.5" step="0.1" value="${rate}"></label>
+        <button class="ghost" id="testv">🔊 Écouter</button>`
+        : '<p class="muted small">La synthèse vocale n\'est pas disponible sur cet appareil : les questions s\'affichent seulement.</p>'}
+    </section>
+    <section class="card"><h3>Confidentialité</h3>
+      <p class="small">Tes profils (empreinte vocale, pouls de repos, réponses apprises) restent <b>uniquement sur cet appareil</b>. Ni la voix ni l'image ne sont enregistrées ou envoyées.</p>
+      <button class="ghost danger" id="wipe">🗑 Effacer toutes mes données</button>
+    </section>
+    <p class="center muted small" id="about">YouLiar</p>`;
+  bindCommon();
+  $('#snd').onchange = () => { if (fx.muted === $('#snd').checked) fx.toggle(); updateMute(); };
+  $('#hap').onchange = () => { fx.setHaptics($('#hap').checked); fx.buzz(30); };
+  $('#cam').onchange = () => { S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera)); };
+  if (synth) {
+    $('#voice').onchange = () => setPref('voice', $('#voice').value);
+    $('#rate').oninput = () => { setPref('rate', $('#rate').value); $('#ratev').textContent = Number($('#rate').value).toFixed(1) + '×'; };
+    $('#testv').onclick = () => speak('As-tu déjà menti à une machine ?');
+  }
+  let armed = 0;
+  $('#wipe').onclick = async () => {
+    if (Date.now() - armed > 3000) { armed = Date.now(); return toast('Appuie encore pour tout effacer : profils et calibrages seront perdus.', true); }
+    await call('wipe_data');
+    try { Object.keys(localStorage).filter((k) => k.startsWith('yl.')).forEach((k) => localStorage.removeItem(k)); } catch { /* ignoré */ }
+    media.stop();
+    S.session = { mode: 'none' }; S.view = null;
+    updateBadge();
+    await loadProfiles().catch(() => {});
+    toast('Toutes tes données ont été effacées.');
+    go('home');
+  };
+  call('app_version').then((v) => { if ($('#about')) $('#about').textContent = `YouLiar ${v}`; }).catch(() => {});
+};
+
 SCREENS.profiles = () => {
   let avatar = AVATARS[Math.floor(Math.random() * AVATARS.length)];
   app.innerHTML = `
@@ -311,9 +369,14 @@ SCREENS.profiles = () => {
             <div class="grow"><b>${esc(p.name)}</b><br><span class="tag">${p.calibrated
               ? `✓ calibré${p.camera_calibrated ? ' · 📷' : ''}${p.answers_learned ? ` · ${p.answers_learned} réponses apprises` : ''}`
               : '<span class="warn">à calibrer</span>'}</span></div>
+            <button class="ghost" data-edit="${esc(p.id)}" aria-label="Modifier ${esc(p.name)}">✏️</button>
             <button class="${p.calibrated ? 'ghost' : 'primary'}" data-cal="${esc(p.id)}">${p.calibrated ? 'Recalibrer' : 'Calibrer'}</button>
             <button class="ghost" data-del="${esc(p.id)}" aria-label="Supprimer ${esc(p.name)}">🗑</button>
           </div>
+          ${S.editing === p.id ? `<div class="stack edit-box">
+            <input type="text" id="ename" maxlength="24" value="${esc(p.name)}" aria-label="Prénom">
+            <div class="avatars" role="radiogroup" aria-label="Avatar">${AVATARS.map((a) => `<button data-eav="${a}" role="radio" aria-checked="${a === p.avatar}" class="${a === p.avatar ? 'sel' : ''}">${a}</button>`).join('')}</div>
+            <div class="row"><button class="ghost grow" id="ecancel">Annuler</button><button class="primary grow" id="esave">Enregistrer</button></div></div>` : ''}
           ${p.calibrated ? idCard(p) : ''}
           ${statsLine(p) ? `<p class="small muted">🏁 ${statsLine(p)}</p>` : ''}
         </div>`).join('') || '<p class="muted">Aucun joueur pour l\'instant.</p>'}
@@ -336,6 +399,22 @@ SCREENS.profiles = () => {
     go('calibrate', { id: p.id });
   };
   $$('[data-cal]').forEach((b) => (b.onclick = () => go('calibrate', { id: b.dataset.cal })));
+  $$('[data-edit]').forEach((b) => (b.onclick = () => { S.editing = S.editing === b.dataset.edit ? null : b.dataset.edit; render(); $('#ename')?.focus(); }));
+  if (S.editing) {
+    let eav = S.profiles.find((p) => p.id === S.editing)?.avatar;
+    $$('[data-eav]').forEach((b) => (b.onclick = () => { eav = b.dataset.eav; $$('[data-eav]').forEach((x) => x.classList.toggle('sel', x === b)); }));
+    $('#ecancel').onclick = () => { S.editing = null; render(); };
+    const save = async () => {
+      const ok = await call('profile_update', { id: S.editing, name: $('#ename').value, avatar: eav }).catch(() => null);
+      if (!ok) return;
+      S.editing = null;
+      await loadProfiles();
+      render();
+      toast('Profil mis à jour ✓');
+    };
+    $('#esave').onclick = save;
+    $('#ename').onkeydown = (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') $('#ecancel').click(); };
+  }
   let armed = null;
   $$('[data-del]').forEach((b) => (b.onclick = async () => {
     if (armed !== b.dataset.del) { armed = b.dataset.del; return toast('Appuie encore pour supprimer ce joueur.'); }
@@ -374,6 +453,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
         } catch (e) { return toast(e.message, true); }
         if (W.camera && !media.camera) toast('Caméra indisponible : calibrage vocal uniquement.', true);
         W.camera = media.camera;
+        media.setRate(30);
         W.steps = await call('calibration_protocol');
         show('mic');
       };
@@ -541,7 +621,8 @@ SCREENS.join = () => {
     <h2>🔗 Rejoindre une partie</h2>
     <section class="card"><h3>Joueur(s) sur cet appareil</h3>${profilePicker(pre)}
       <button class="ghost" data-goto="profiles">＋ Nouveau joueur</button></section>
-    <section class="card"><h3>Parties à proximité</h3><div id="found" class="stack"></div></section>
+    <section class="card"><h3>Parties à proximité</h3><div id="found" class="stack"></div>
+      <button class="ghost" id="scan">📷 Scanner le QR code de l'hôte</button><div id="scanner"></div></section>
     <section class="card">
       <h3>Connexion</h3>
       <div class="row">
@@ -557,25 +638,106 @@ SCREENS.join = () => {
   renderFound();
   call('discovery_start').catch(() => {});
   $('#code').oninput = (e) => { e.target.value = e.target.value.replace(/\D/g, ''); if (e.target.value.length === 6) $('#go').focus(); };
-  $('#go').onclick = async () => {
-    const ids = picked();
-    if (!ids.length) return toast('Choisis au moins un joueur.', true);
-    S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera));
-    const ip = $('#ip').value.trim();
-    setPref('lastip', ip);
-    $('#go').disabled = true;
-    $('#go').textContent = 'Connexion…';
+  $('#scan').onclick = () => startScanner((info) => {
+    $('#ip').value = info.ips[0];
+    $('#port').value = info.port;
+    $('#code').value = info.code;
+    joinGame(info.ips);
+  });
+  $('#go').onclick = () => joinGame([$('#ip').value.trim()]);
+};
+
+/** Rejoint la partie en essayant chaque adresse de l'hôte (un hôte peut en avoir plusieurs). */
+async function joinGame(ips) {
+  const ids = picked();
+  if (!ids.length) return toast('Choisis au moins un joueur.', true);
+  S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera));
+  const port = Number($('#port').value) || 47820;
+  const code = $('#code').value.trim();
+  $('#go').disabled = true;
+  $('#go').textContent = 'Connexion…';
+  let lastError = null;
+  for (const ip of ips.filter(Boolean)) {
     try {
-      await call('session_join', { ip, port: Number($('#port').value) || 47820, code: $('#code').value.trim(), profileIds: ids });
+      await TAURI.core.invoke('session_join', { ip, port, code, profileIds: ids });
+      setPref('lastip', ip);
       S.session = { mode: 'client' };
       updateBadge();
       fx.play('start');
-      go('game');
-    } catch {
-      if ($('#go')) { $('#go').disabled = false; $('#go').textContent = 'Rejoindre'; }
+      return go('game');
+    } catch (e) {
+      lastError = typeof e === 'string' ? e : e?.message ?? String(e);
+      // Code faux ou version incompatible : inutile d'essayer les autres adresses.
+      if (/code|version|refuse/i.test(lastError)) break;
     }
-  };
-};
+  }
+  toast(lastError ?? 'Adresse IP manquante.', true);
+  if ($('#go')) { $('#go').disabled = false; $('#go').textContent = 'Rejoindre'; }
+}
+
+/** Scanner de QR code : image en niveaux de gris décodée par le cœur Rust (~3 fois/s). */
+let scanner = null;
+async function startScanner(onFound) {
+  stopScanner();
+  const box = $('#scanner');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } } });
+  } catch {
+    return toast('Caméra indisponible : saisis l\'adresse et le code à la main.', true);
+  }
+  box.innerHTML = `<div class="scan-view"><video playsinline muted></video><div class="scan-frame"></div></div>
+    <p class="center small muted pulse">Vise le QR code affiché sur l'appareil de l'hôte…</p>
+    <button class="ghost full" id="scancancel">Annuler</button>`;
+  const video = $('video', box);
+  video.srcObject = stream;
+  video.play().catch(() => {});
+  $('#scancancel').onclick = stopScanner;
+  const canvas = document.createElement('canvas');
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  let busy = false;
+  const timer = setInterval(async () => {
+    if (busy || video.readyState < 2 || !video.videoWidth) return;
+    busy = true;
+    try {
+      const scale = Math.min(1, 640 / video.videoWidth);
+      const w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
+      canvas.width = w; canvas.height = h;
+      g.drawImage(video, 0, 0, w, h);
+      const px = g.getImageData(0, 0, w, h).data;
+      const grey = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) grey[i] = (px[i * 4] * 77 + px[i * 4 + 1] * 150 + px[i * 4 + 2] * 29) >> 8;
+      const text = await TAURI.core.invoke('scan_qr', grey, { headers: { 'x-width': String(w), 'x-height': String(h) } });
+      const info = text && parseJoinQr(text);
+      if (info && scanner?.timer === timer) {
+        stopScanner();
+        fx.play('vote');
+        fx.buzz(40);
+        onFound(info);
+      }
+    } catch { /* image suivante */ } finally { busy = false; }
+  }, 330);
+  scanner = { stream, timer };
+}
+
+function stopScanner() {
+  if (!scanner) return;
+  clearInterval(scanner.timer);
+  scanner.stream.getTracks().forEach((t) => t.stop());
+  scanner = null;
+  const box = document.getElementById('scanner');
+  if (box) box.innerHTML = '';
+}
+
+/** « YOULIAR1;ip1,ip2;port;code » — donnée lue d'une image : tout est revalidé. */
+function parseJoinQr(text) {
+  const [tag, ipList, port, code] = text.split(';');
+  const ipv4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+  const ips = (ipList ?? '').split(',').filter((ip) => ipv4.test(ip)).slice(0, 8);
+  const p = Number(port);
+  if (tag !== 'YOULIAR1' || !ips.length || !(p > 0 && p < 65536) || !/^\d{6}$/.test(code ?? '')) return null;
+  return { ips, port: p, code };
+}
 
 function renderFound() {
   const el = $('#found');
@@ -611,6 +773,7 @@ function renderGame(force = false) {
   // Conserve la saisie en cours lors d'un rafraîchissement.
   const kept = $$('[data-keep]').map((i) => [i.id, i.value]);
 
+  media.setRate(mineSubject && (v.stage === 'asking' || v.stage === 'answering') ? 30 : 5);
   if (v.stage !== 'lobby' && v.stage !== 'finished' && !media.ready) {
     media.start({ camera: S.useCamera }).catch((e) => toast(e.message, true));
   }
@@ -675,7 +838,8 @@ const STAGES = {
           <span>🎤</span><b>Libre</b><small>Chacun pose les questions qu'il veut, à qui il veut</small></button>
       </section>
       ${net ? `<section class="card center">
-          <p class="muted small">Code à saisir sur les autres appareils</p>
+          <div class="qr" id="qr" aria-label="QR code pour rejoindre la partie"></div>
+          <p class="muted small">Scanne ce QR code depuis « Rejoindre une partie », ou saisis le code :</p>
           <div class="big-code" aria-label="Code ${esc(net.code.split('').join(' '))}">${esc(net.code.slice(0, 3))}<span>${esc(net.code.slice(3))}</span></div>
           <p class="ip-list">${net.ips.map((ip) => `${esc(ip)}:${net.port}`).join('<br>') || 'Aucune adresse réseau détectée'}</p>
           <p class="muted small">Sur les autres appareils : « Rejoindre une partie ». 🔒 Connexions chiffrées : ne montre ce code qu'aux joueurs présents.</p>
@@ -695,7 +859,9 @@ const STAGES = {
         <div class="field"><span>Mentir ou pas ?</span>
           <div class="seg" role="radiogroup">
             <button role="radio" data-mode="assigned" class="${s.instruction_mode === 'assigned' ? 'sel' : ''}" ${host ? '' : 'disabled'}>🎲 Consigne secrète</button>
-            <button role="radio" data-mode="free" class="${s.instruction_mode === 'free' ? 'sel' : ''}" ${host ? '' : 'disabled'}>🤔 Libre choix</button></div></div>`}
+            <button role="radio" data-mode="free" class="${s.instruction_mode === 'free' ? 'sel' : ''}" ${host ? '' : 'disabled'}>🤔 Libre choix</button></div></div>
+        <div class="field"><span>Temps de vote</span>
+          <div class="seg" role="radiogroup">${[[15, '15 s'], [30, '30 s'], [60, '60 s'], [0, '∞']].map(([n, l]) => `<button role="radio" aria-checked="${n === (s.vote_seconds ?? 30)}" class="${n === (s.vote_seconds ?? 30) ? 'sel' : ''}" data-vsecs="${n}" ${host ? '' : 'disabled'}>${l}</button>`).join('')}</div></div>`}
         <div class="field"><span>${free ? 'Idées de questions' : 'Questions'}</span>
           <div class="seg wrap" role="radiogroup">${Object.entries(PACKS).map(([k, l]) => `<button role="radio" data-pack="${k}" class="${s.pack === k ? 'sel' : ''}" ${host ? '' : 'disabled'}>${l}</button>`).join('')}</div></div>
         <label class="check"><input type="checkbox" id="aloud" ${s.read_aloud ? 'checked' : ''} ${host ? '' : 'disabled'}> La machine lit les questions à voix haute</label>
@@ -804,7 +970,9 @@ const STAGES = {
               <div class="row"><button class="truth grow big" data-vote="${esc(p.id)}" data-lie="false">😇 Vérité</button><button class="lie grow big" data-vote="${esc(p.id)}" data-lie="true">🤥 Mensonge</button></div></div>`).join('')}
         </section>` : '<p class="center muted pulse">Les autres délibèrent…</p>'}
       <section class="card"><div class="voters">${voters.map((p) => `<span class="${done.has(p.id) ? 'ok' : ''}" title="${esc(p.name)}">${esc(p.avatar)}</span>`).join('')}</div>
-        <p class="center muted small">Votes : ${done.size} / ${voters.length}</p></section>
+        <p class="center muted small">Votes : ${done.size} / ${voters.length}</p>
+        ${S.voteEnd ? '<div class="countdown"><div class="bar" id="cdbar"></div><span id="cdtxt"></span></div>' : ''}</section>
+      ${myVoters.filter((p) => !done.has(p.id)).length === 1 ? '<p class="center muted small kbd-hint">Raccourcis clavier : <kbd>V</kbd> vérité · <kbd>M</kbd> mensonge · <kbd>S</kbd> sûr de moi</p>' : ''}
       ${v.is_host ? '<button class="ghost" id="force">Révéler sans attendre</button>' : ''}`;
   },
 
@@ -962,6 +1130,11 @@ const STAGES_BIND = {
   },
 
   lobby(v) {
+    const net = S.session.mode === 'host' ? S.session.info : null;
+    if (net && $('#qr')) {
+      if (S.qr?.code === net.code) $('#qr').innerHTML = S.qr.svg;
+      else call('host_qr').then((svg) => { S.qr = { code: net.code, svg }; if ($('#qr')) $('#qr').innerHTML = svg; }).catch(() => {});
+    }
     $$('[data-rm]').forEach((b) => (b.onclick = () => act({ type: 'remove_player', player_id: b.dataset.rm })));
     $$('[data-calib]').forEach((b) => (b.onclick = () => go('calibrate', { id: b.dataset.calib, returnTo: 'game' })));
     $('#addbtn') && ($('#addbtn').onclick = async () => {
@@ -971,6 +1144,7 @@ const STAGES_BIND = {
     const upd = (patch) => act({ type: 'update_settings', settings: { ...v.settings, ...patch } });
     if (v.is_host) {
       $$('[data-gmode]').forEach((b) => (b.onclick = () => upd({ mode: b.dataset.gmode })));
+      $$('[data-vsecs]').forEach((b) => (b.onclick = () => upd({ vote_seconds: Number(b.dataset.vsecs) })));
       $$('[data-rounds]').forEach((b) => (b.onclick = () => upd({ rounds_per_player: Number(b.dataset.rounds) })));
       $$('[data-mode]').forEach((b) => (b.onclick = () => upd({ instruction_mode: b.dataset.mode })));
       $$('[data-pack]').forEach((b) => (b.onclick = () => upd({ pack: b.dataset.pack })));
@@ -1107,6 +1281,41 @@ async function runAnswer(v, r) {
   }
 }
 
+// ---------- Compte à rebours du vote et raccourcis ----------
+
+/** L'hôte envoie le temps restant ; on le convertit en échéance sur l'horloge locale. */
+function trackVoteDeadline(v) {
+  const ms = v?.stage === 'voting' ? v.vote_remaining_ms : null;
+  S.voteEnd = ms == null ? null : performance.now() + ms;
+}
+
+let lastTick = null;
+setInterval(() => {
+  const bar = document.getElementById('cdbar');
+  if (!S.voteEnd || !bar) return;
+  const total = (S.view?.settings.vote_seconds || 30) * 1000;
+  const left = Math.max(0, S.voteEnd - performance.now());
+  bar.style.width = `${(100 * left) / total}%`;
+  bar.classList.toggle('urgent', left < 5000);
+  const secs = Math.ceil(left / 1000);
+  document.getElementById('cdtxt').textContent = secs ? `${secs} s` : 'Temps écoulé !';
+  if (secs <= 5 && secs > 0 && secs !== lastTick) { lastTick = secs; fx.play('tick'); }
+}, 200);
+
+document.addEventListener('keydown', (e) => {
+  if (S.screen !== 'game' || S.view?.stage !== 'voting' || e.target.closest?.('input, textarea, select')) return;
+  const pending = S.view.players.filter((p) => p.mine && p.connected && p.id !== S.view.round?.subject && !S.view.round?.voted.includes(p.id));
+  if (pending.length !== 1) return;
+  const id = pending[0].id;
+  const key = e.key.toLowerCase();
+  if (key === 's') {
+    const box = $(`[data-sure="${CSS.escape(id)}"]`);
+    if (box) box.checked = !box.checked;
+  } else if (key === 'v' || key === 'm') {
+    $(`[data-vote="${CSS.escape(id)}"][data-lie="${key === 'm'}"]`)?.click();
+  }
+});
+
 // ---------- Démarrage ----------
 
 async function boot() {
@@ -1118,6 +1327,7 @@ async function boot() {
   await listen('game-state', (e) => {
     const prev = S.view;
     S.view = e.payload;
+    trackVoteDeadline(S.view);
     // Nouvelle partie / retour au salon : on oublie les réponses mémorisées.
     if (prev && prev.stage !== 'lobby' && S.view.stage === 'lobby') { S.answers = {}; S.revealed = {}; }
     // Annonces sonores des changements d'étape.
@@ -1160,6 +1370,7 @@ async function boot() {
   updateBadge();
   if (info.mode !== 'none') {
     S.view = await call('game_state').catch(() => null);
+    trackVoteDeadline(S.view);
     go('game');
   } else {
     go('home');

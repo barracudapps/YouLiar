@@ -80,6 +80,16 @@ pendant ~35 s ; le joueur retrouve sa place dans la partie.
 
 Le mode se choisit dans le salon (par l'hôte), en local comme en réseau.
 
+**Rejoindre** : scanner le QR code affiché par l'hôte (caméra de l'appareil qui rejoint,
+décodage local), choisir une partie détectée sur le réseau, ou saisir l'adresse et le code.
+
+**Rythme** : en mode jeu, le vote est limité dans le temps (15, 30 ou 60 s, ou illimité) ;
+à l'échéance, la révélation est automatique. Les questions déjà posées sont mémorisées par
+l'hôte pour ne pas revenir d'une soirée à l'autre (500 dernières).
+
+**Réglages** : sons, vibrations, caméra par défaut, halo lumineux, voix et vitesse de lecture
+des questions, effacement de toutes les données ; nom et avatar modifiables dans les profils.
+
 ## Déroulé (mode jeu)
 
 1. **Calibrage** (~3 min, par joueur, conservé entre les parties) :
@@ -123,7 +133,9 @@ ui/                      interface HTML/CSS/JS sans framework : capture micro/ca
 L'hôte détient l'unique état de partie qui fait foi. Une partie locale est un hôte sans
 réseau : le même code sert pour les deux modes.
 
-Ports : TCP 47820 (partie), UDP 47821 (découverte).
+Ports : TCP 47820 (partie), UDP 47821 (découverte). Sur mobile, la caméra n'analyse que
+5 images/s hors des mesures (30 images/s pendant la réponse du joueur) et s'arrête quand
+l'application passe en arrière-plan.
 
 ## Pistes
 

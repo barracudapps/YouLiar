@@ -22,6 +22,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub const HOST_DEVICE: &str = "host";
 
@@ -82,11 +83,21 @@ pub struct Settings {
     pub pack: Pack,
     /// La machine lit la question à voix haute (synthèse vocale).
     pub read_aloud: bool,
+    /// Temps de vote en secondes (0 = illimité). Au-delà, la révélation est automatique.
+    #[serde(default = "default_vote_seconds")]
+    pub vote_seconds: u32,
 }
+
+fn default_vote_seconds() -> u32 {
+    30
+}
+
+/// Nombre maximal de questions mémorisées pour éviter les répétitions d'une soirée à l'autre.
+pub const MAX_USED_QUESTIONS: usize = 500;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { game_name: "Partie YouLiar".into(), mode: GameMode::Game, rounds_per_player: 2, instruction_mode: InstructionMode::Assigned, pack: Pack::Soft, read_aloud: true }
+        Self { game_name: "Partie YouLiar".into(), mode: GameMode::Game, rounds_per_player: 2, instruction_mode: InstructionMode::Assigned, pack: Pack::Soft, read_aloud: true, vote_seconds: default_vote_seconds() }
     }
 }
 
@@ -226,6 +237,9 @@ pub struct GameView {
     pub history: Vec<RoundRecord>,
     /// Mode libre : idées de questions proposées dans la salle d'interrogatoire.
     pub suggestions: Vec<String>,
+    /// Temps de vote restant au moment où la vue est produite.
+    #[serde(default)]
+    pub vote_remaining_ms: Option<u64>,
 }
 
 pub struct Game {
@@ -237,6 +251,7 @@ pub struct Game {
     pub machine: MachineStats,
     pub history: Vec<RoundRecord>,
     suggestions: Vec<String>,
+    vote_deadline: Option<Instant>,
     used: Vec<String>,
     rng: StdRng,
 }
@@ -255,7 +270,7 @@ fn err<T>(msg: &str) -> Result<T, String> {
 
 impl Game {
     pub fn new(rng: StdRng) -> Self {
-        Self { settings: Settings::default(), players: vec![], stage: Stage::Lobby, round: None, round_no: 0, machine: MachineStats::default(), history: vec![], suggestions: vec![], used: vec![], rng }
+        Self { settings: Settings::default(), players: vec![], stage: Stage::Lobby, round: None, round_no: 0, machine: MachineStats::default(), history: vec![], suggestions: vec![], vote_deadline: None, used: vec![], rng }
     }
 
     pub fn total_rounds(&self) -> u32 {
@@ -263,6 +278,26 @@ impl Game {
             GameMode::Game => self.settings.rounds_per_player * self.players.len() as u32,
             GameMode::Free => 0,
         }
+    }
+
+    /// Questions déjà posées (persistées par l'hôte d'une session à l'autre).
+    pub fn used_questions(&self) -> &[String] {
+        &self.used
+    }
+
+    pub fn set_used_questions(&mut self, mut used: Vec<String>) {
+        used.retain(|q| q.chars().count() <= 200);
+        let excess = used.len().saturating_sub(MAX_USED_QUESTIONS);
+        used.drain(..excess);
+        self.used = used;
+    }
+
+    /// Fin du vote en cours, pour que l'hôte programme la révélation automatique.
+    pub fn vote_deadline(&self) -> Option<(u32, Instant)> {
+        if self.stage != Stage::Voting {
+            return None;
+        }
+        Some((self.round.as_ref()?.number, self.vote_deadline?))
     }
 
     fn free(&self) -> bool {
@@ -292,6 +327,9 @@ impl Game {
             fresh[self.rng.gen_range(0..fresh.len())]
         };
         self.used.push(q.to_string());
+        if self.used.len() > MAX_USED_QUESTIONS {
+            self.used.remove(0);
+        }
         q.to_string()
     }
 
@@ -411,6 +449,7 @@ impl Game {
         });
         r.outcome = Some(outcome);
         self.stage = Stage::Reveal;
+        self.vote_deadline = None;
     }
 
     pub fn apply(&mut self, device: &str, action: Action) -> R {
@@ -461,6 +500,7 @@ impl Game {
                 }
                 let mut s = settings;
                 s.rounds_per_player = s.rounds_per_player.clamp(1, 10);
+                s.vote_seconds = s.vote_seconds.min(120);
                 s.game_name = s.game_name.trim().chars().filter(|c| !c.is_control()).take(40).collect();
                 if s.game_name.is_empty() {
                     s.game_name = Settings::default().game_name;
@@ -621,6 +661,8 @@ impl Game {
                 } else {
                     self.round.as_mut().unwrap().verdict = Some(verdict);
                     self.stage = Stage::Voting;
+                    let secs = self.settings.vote_seconds;
+                    self.vote_deadline = (secs > 0).then(|| Instant::now() + Duration::from_secs(u64::from(secs)));
                     self.check_votes_complete();
                 }
             }
@@ -751,6 +793,9 @@ impl Game {
             machine: self.machine.clone(),
             history: self.history.clone(),
             suggestions: if self.stage == Stage::Free { self.suggestions.clone() } else { vec![] },
+            vote_remaining_ms: self
+                .vote_deadline()
+                .map(|(_, end)| end.saturating_duration_since(Instant::now()).as_millis() as u64),
         }
     }
 }
@@ -814,6 +859,33 @@ mod tests {
         g.device_left("d2");
         assert_eq!(g.stage, Stage::Asking);
         assert_eq!(g.round.as_ref().unwrap().subject, "a");
+    }
+
+    #[test]
+    fn voting_timer_and_question_memory() {
+        let mut g = Game::new(StdRng::seed_from_u64(11));
+        g.settings.vote_seconds = 15;
+        g.set_used_questions(questions_for(Pack::Soft).iter().skip(1).map(|q| q.to_string()).collect());
+        g.apply(HOST_DEVICE, Action::AddPlayers { players: vec![info("a")] }).unwrap();
+        g.apply("d2", Action::AddPlayers { players: vec![info("b")] }).unwrap();
+        g.apply(HOST_DEVICE, Action::Start).unwrap();
+        // Une seule question jamais posée : elle sort forcément parmi les 3 proposées.
+        let fresh = questions_for(Pack::Soft)[0];
+        assert!(g.round.as_ref().unwrap().choices.iter().any(|q| q == fresh));
+        assert!(g.used_questions().len() <= MAX_USED_QUESTIONS);
+
+        g.apply("d2", Action::ChooseQuestion { index: 0 }).unwrap();
+        g.apply(HOST_DEVICE, Action::StartAnswer).unwrap();
+        assert!(g.view_for("d2").vote_remaining_ms.is_none());
+        g.apply(HOST_DEVICE, Action::SubmitVerdict { verdict: verdict(true) }).unwrap();
+        let (n, _) = g.vote_deadline().expect("échéance de vote");
+        assert_eq!(n, 1);
+        let left = g.view_for("d2").vote_remaining_ms.unwrap();
+        assert!(left > 14_000 && left <= 15_000, "{left}");
+        // L'hôte révèle à l'échéance (le joueur n'a pas voté).
+        g.apply(HOST_DEVICE, Action::Reveal).unwrap();
+        assert_eq!(g.stage, Stage::Reveal);
+        assert!(g.vote_deadline().is_none());
     }
 
     #[test]

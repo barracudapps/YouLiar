@@ -2,6 +2,7 @@
 
 let ctx = null;
 let muted = (() => { try { return localStorage.getItem('yl.muted') === 'true'; } catch { return false; } })();
+let haptics = (() => { try { return localStorage.getItem('yl.haptics') !== 'false'; } catch { return true; } })();
 export const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
 function ac() {
@@ -36,6 +37,7 @@ const SOUNDS = {
   vote: () => { tone(520, 0.07, { gain: 0.12 }); tone(780, 0.09, { gain: 0.12, delay: 0.07 }); },
   start: () => tone(220, 0.5, { type: 'triangle', slideTo: 880, gain: 0.12 }),
   rec: () => { tone(880, 0.08, { gain: 0.1 }); tone(880, 0.08, { gain: 0.1, delay: 0.14 }); },
+  tick: () => tone(1200, 0.05, { type: 'square', gain: 0.05 }),
   suspense: () => { for (let i = 0; i < 8; i++) tone(300 + i * 40, 0.08, { type: 'square', gain: 0.04, delay: i * 0.2 }); },
   lie: () => { tone(150, 0.32, { type: 'sawtooth', slideTo: 95, gain: 0.16 }); tone(150, 0.4, { type: 'sawtooth', slideTo: 80, gain: 0.16, delay: 0.38 }); },
   truth: () => [523, 659, 784].forEach((f, i) => tone(f, 0.35, { gain: 0.12, delay: i * 0.09 })),
@@ -50,8 +52,13 @@ export const fx = {
     try { localStorage.setItem('yl.muted', String(muted)); } catch { /* ignoré */ }
     return muted;
   },
+  get haptics() { return haptics; },
+  setHaptics(on) {
+    haptics = on;
+    try { localStorage.setItem('yl.haptics', String(on)); } catch { /* ignoré */ }
+  },
   play(name) { if (!muted) try { SOUNDS[name]?.(); } catch { /* audio indisponible */ } },
-  buzz(pattern) { try { navigator.vibrate?.(pattern); } catch { /* non pris en charge */ } },
+  buzz(pattern) { if (haptics) try { navigator.vibrate?.(pattern); } catch { /* non pris en charge */ } },
 };
 
 // Garde l'écran allumé pendant une partie (sinon le téléphone se verrouille en pleine manche).

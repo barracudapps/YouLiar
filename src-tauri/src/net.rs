@@ -58,6 +58,9 @@ const OUTBOX: usize = 64;
 /// Canal vers l'interface (événements Tauri en production, collecteur en test).
 pub type Emit = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 
+/// Persistance des questions déjà posées (fichier côté application, rien en test).
+pub type UsedSink = Arc<dyn Fn(&[String]) + Send + Sync>;
+
 fn send_evt<T: Serialize>(emit: &Emit, name: &str, payload: T) {
     if let Ok(v) = serde_json::to_value(payload) {
         emit(name, v);
@@ -184,11 +187,18 @@ pub struct HostShared {
     next_id: AtomicU64,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     info: Mutex<Option<HostInfo>>,
+    /// Manche dont la révélation automatique est déjà programmée.
+    vote_timer: Mutex<Option<u32>>,
+    used_sink: Option<UsedSink>,
+    used_mark: Mutex<(usize, Option<String>)>,
 }
 
 impl HostShared {
-    fn new(emit: Emit, game: Game, info: Option<HostInfo>) -> Self {
+    fn new(emit: Emit, game: Game, info: Option<HostInfo>, used_sink: Option<UsedSink>) -> Self {
         Self {
+            vote_timer: Mutex::new(None),
+            used_mark: Mutex::new((game.used_questions().len(), game.used_questions().last().cloned())),
+            used_sink,
             emit,
             game: Mutex::new(game),
             peers: Mutex::new(HashMap::new()),
@@ -209,10 +219,47 @@ impl HostShared {
         self.info.lock().unwrap().as_ref().map(|i| i.code.clone()).unwrap_or_default()
     }
 
-    pub fn apply(&self, device: &str, action: Action) -> Result<(), String> {
+    pub fn apply(self: &Arc<Self>, device: &str, action: Action) -> Result<(), String> {
         self.game.lock().unwrap().apply(device, action)?;
-        self.broadcast();
+        self.after_change();
         Ok(())
+    }
+
+    /// Diffuse le nouvel état, programme la révélation automatique du vote et mémorise
+    /// les questions posées.
+    fn after_change(self: &Arc<Self>) {
+        self.broadcast();
+        let (deadline, used) = {
+            let g = self.game.lock().unwrap();
+            let q = g.used_questions();
+            let mark = (q.len(), q.last().cloned());
+            let mut last = self.used_mark.lock().unwrap();
+            let changed = *last != mark;
+            *last = mark;
+            (g.vote_deadline(), changed.then(|| q.to_vec()))
+        };
+        if let (Some(sink), Some(used)) = (&self.used_sink, used) {
+            sink(&used);
+        }
+        let Some((round, end)) = deadline else { return };
+        {
+            let mut scheduled = self.vote_timer.lock().unwrap();
+            if *scheduled == Some(round) {
+                return;
+            }
+            *scheduled = Some(round);
+        }
+        let h = Arc::clone(self);
+        self.spawn(async move {
+            tokio::time::sleep(end.saturating_duration_since(Instant::now())).await;
+            let revealed = {
+                let mut g = h.game.lock().unwrap();
+                g.vote_deadline().is_some_and(|(n, _)| n == round) && g.apply(HOST_DEVICE, Action::Reveal).is_ok()
+            };
+            if revealed {
+                h.after_change();
+            }
+        });
     }
 
     pub fn view(&self) -> GameView {
@@ -339,22 +386,25 @@ fn local_ipv4() -> Vec<(Ipv4Addr, Option<Ipv4Addr>)> {
     out
 }
 
-pub fn start_local(emit: Emit) -> Arc<HostShared> {
-    let h = Arc::new(HostShared::new(emit, Game::default(), None));
+pub fn start_local(emit: Emit, used: Vec<String>, used_sink: Option<UsedSink>) -> Arc<HostShared> {
+    let mut game = Game::default();
+    game.set_used_questions(used);
+    let h = Arc::new(HostShared::new(emit, game, None, used_sink));
     h.broadcast();
     h
 }
 
-pub async fn start_host(emit: Emit, game_name: String) -> Result<Arc<HostShared>, String> {
+pub async fn start_host(emit: Emit, game_name: String, used: Vec<String>, used_sink: Option<UsedSink>) -> Result<Arc<HostShared>, String> {
     let listener = match TcpListener::bind(("0.0.0.0", DEFAULT_TCP_PORT)).await {
         Ok(l) => l,
         Err(_) => TcpListener::bind(("0.0.0.0", 0)).await.map_err(|e| format!("Impossible d'ouvrir le port réseau : {e}"))?,
     };
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let mut game = Game::default();
+    game.set_used_questions(used);
     game.apply(HOST_DEVICE, Action::UpdateSettings { settings: youliar_core::game::Settings { game_name, ..Default::default() } })?;
     let info = HostInfo { ips: local_ipv4().iter().map(|(ip, _)| ip.to_string()).collect(), port, code: new_code() };
-    let h = Arc::new(HostShared::new(emit, game, Some(info)));
+    let h = Arc::new(HostShared::new(emit, game, Some(info), used_sink));
 
     let hh = h.clone();
     h.spawn(async move {
@@ -457,7 +507,7 @@ async fn handle_peer(h: Arc<HostShared>, stream: TcpStream, addr: SocketAddr) {
     let _ = out_tx.try_send(ServerMsg::Welcome { device: device.clone(), resume: token });
     // Remplace une éventuelle connexion fantôme du même appareil.
     h.peers.lock().unwrap().insert(device.clone(), Peer { conn, tx: out_tx.clone() });
-    h.broadcast();
+    h.after_change();
 
     let writer = tauri::async_runtime::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
@@ -507,7 +557,7 @@ async fn handle_peer(h: Arc<HostShared>, stream: TcpStream, addr: SocketAddr) {
     };
     if current {
         h.game.lock().unwrap().device_left(&device);
-        h.broadcast();
+        h.after_change();
     }
     writer.abort();
 }
@@ -815,7 +865,7 @@ mod tests {
     fn host_and_client_play_a_round_over_encrypted_tcp() {
         tauri::async_runtime::block_on(async {
             let (host_emit, host_log) = collector();
-            let host = start_host(host_emit, "Test".into()).await.unwrap();
+            let host = start_host(host_emit, "Test".into(), vec![], None).await.unwrap();
             let info_h = host.info().unwrap();
             assert_eq!(info_h.code.len(), CODE_LEN);
             host.apply(HOST_DEVICE, Action::AddPlayers { players: vec![info("alice")] }).unwrap();
@@ -872,7 +922,7 @@ mod tests {
     fn device_can_resume_its_seat_after_a_drop() {
         tauri::async_runtime::block_on(async {
             let (emit, log) = collector();
-            let host = start_host(emit, "T".into()).await.unwrap();
+            let host = start_host(emit, "T".into(), vec![], None).await.unwrap();
             let hi = host.info().unwrap();
             host.apply(HOST_DEVICE, Action::AddPlayers { players: vec![info("alice")] }).unwrap();
             let c = connect(local(hi.port), &hi.code, &[info("bob")], None).await.ok().unwrap();
@@ -891,10 +941,35 @@ mod tests {
     }
 
     #[test]
+    fn vote_is_revealed_automatically_and_questions_are_persisted() {
+        tauri::async_runtime::block_on(async {
+            let (emit, log) = collector();
+            let saved: Arc<Mutex<Vec<String>>> = Arc::default();
+            let s2 = saved.clone();
+            let sink: UsedSink = Arc::new(move |q: &[String]| *s2.lock().unwrap() = q.to_vec());
+            let host = start_local(emit, vec![], Some(sink));
+            host.apply(HOST_DEVICE, Action::AddPlayers { players: vec![info("a"), info("b")] }).unwrap();
+            let mut settings = host.view().settings;
+            settings.vote_seconds = 1;
+            host.apply(HOST_DEVICE, Action::UpdateSettings { settings }).unwrap();
+            host.apply(HOST_DEVICE, Action::Start).unwrap();
+            assert_eq!(saved.lock().unwrap().len(), 3, "les 3 questions proposées sont mémorisées");
+            host.apply(HOST_DEVICE, Action::ChooseQuestion { index: 0 }).unwrap();
+            host.apply(HOST_DEVICE, Action::StartAnswer).unwrap();
+            let verdict = Verdict { probability: 0.9, index: 90, label: String::new(), is_lie: true, factors: vec![], heart_rate: None, confidence: 0.5, speaker: None };
+            host.apply(HOST_DEVICE, Action::SubmitVerdict { verdict }).unwrap();
+            assert_eq!(host.view().stage, Stage::Voting);
+            // Personne ne vote : l'hôte révèle seul à l'échéance.
+            wait_for(&log, |v| v.stage == Stage::Reveal).await;
+            host.shutdown();
+        });
+    }
+
+    #[test]
     fn hostile_peers_are_contained() {
         tauri::async_runtime::block_on(async {
             let (emit, log) = collector();
-            let host = start_host(emit, "T".into()).await.unwrap();
+            let host = start_host(emit, "T".into(), vec![], None).await.unwrap();
             let hi = host.info().unwrap();
             // Trame annoncée géante : coupée sans allouer.
             let mut s = TcpStream::connect(local(hi.port)).await.unwrap();

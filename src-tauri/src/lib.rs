@@ -22,6 +22,7 @@ use youliar_core::video::{self, VideoFeatures, VideoSample};
 struct AppState {
     profiles: Mutex<Vec<PlayerProfile>>,
     profiles_path: Mutex<Option<PathBuf>>,
+    used_path: Mutex<Option<PathBuf>>,
     session: Mutex<Option<Session>>,
     discovery: Mutex<Option<JoinHandle<()>>>,
 }
@@ -36,6 +37,23 @@ impl AppState {
         let tmp = path.with_extension("json.tmp");
         write_private(&tmp, &json).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    }
+
+    fn used_questions(&self) -> Vec<String> {
+        let path = self.used_path.lock().unwrap().clone();
+        path.and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Mémorise les questions posées, pour ne pas les reproposer à la prochaine soirée.
+    fn used_sink(&self) -> Option<net::UsedSink> {
+        let path = self.used_path.lock().unwrap().clone()?;
+        Some(Arc::new(move |used: &[String]| {
+            if let Ok(json) = serde_json::to_vec(used) {
+                let _ = write_private(&path, &json);
+            }
+        }))
     }
 
     fn with_profile<T>(&self, id: &str, f: impl FnOnce(&mut PlayerProfile) -> T) -> Result<T, String> {
@@ -131,6 +149,82 @@ async fn profile_create(state: State<'_, AppState>, name: String, avatar: String
 async fn profile_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.profiles.lock().unwrap().retain(|p| p.id != id);
     state.save()
+}
+
+#[tauri::command]
+async fn profile_update(state: State<'_, AppState>, id: String, name: String, avatar: String) -> Result<ProfileSummary, String> {
+    let name: String = name.trim().chars().filter(|c| !c.is_control()).take(24).collect();
+    let avatar: String = avatar.chars().filter(|c| !c.is_control()).take(4).collect();
+    if name.is_empty() || avatar.is_empty() {
+        return Err("Choisis un prénom et un avatar.".into());
+    }
+    state.with_profile(&id, |p| {
+        p.name = name;
+        p.avatar = avatar;
+        ProfileSummary::from(&*p)
+    })
+}
+
+/// Efface toutes les données locales : profils (empreintes vocales, pouls) et questions mémorisées.
+#[tauri::command]
+async fn wipe_data(state: State<'_, AppState>) -> Result<(), String> {
+    replace_session(&state, None);
+    state.profiles.lock().unwrap().clear();
+    for path in [state.profiles_path.lock().unwrap().clone(), state.used_path.lock().unwrap().clone()].into_iter().flatten() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Suppression impossible : {e}")),
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// QR code de la partie hébergée : adresses, port et code, à scanner depuis « Rejoindre ».
+#[tauri::command]
+fn host_qr(state: State<AppState>) -> Result<String, String> {
+    let info = match state.session.lock().unwrap().as_ref().map(Session::info) {
+        Some(SessionInfo::Host { info }) => info,
+        _ => return Err("Aucune partie réseau hébergée.".into()),
+    };
+    let payload = format!("YOULIAR1;{};{};{}", info.ips.join(","), info.port, info.code);
+    let qr = qrcode::QrCode::new(payload.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(qr
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(200, 200)
+        .dark_color(qrcode::render::svg::Color("#0e0b16"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build())
+}
+
+const MAX_SCAN_PIXELS: usize = 1280 * 960;
+
+/// Cherche un QR code YouLiar dans une image en niveaux de gris (corps brut,
+/// en-têtes `x-width` / `x-height`).
+#[tauri::command]
+async fn scan_qr(request: Request<'_>) -> Result<Option<String>, String> {
+    let InvokeBody::Raw(bytes) = request.body() else { return Err("Image attendue en binaire.".into()) };
+    let dim = |k: &str| request.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok());
+    let (w, h) = (dim("x-width").unwrap_or(0), dim("x-height").unwrap_or(0));
+    if w == 0 || h == 0 || w * h > MAX_SCAN_PIXELS || bytes.len() != w * h {
+        return Err("Image invalide.".into());
+    }
+    let pixels = bytes.clone();
+    tauri::async_runtime::spawn_blocking(move || find_join_qr(w, h, &pixels)).await.map_err(|e| e.to_string())
+}
+
+fn find_join_qr(w: usize, h: usize, pixels: &[u8]) -> Option<String> {
+    let mut img = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| pixels[y * w + x]);
+    img.detect_grids()
+        .iter()
+        .filter_map(|g| g.decode().ok())
+        .map(|(_, content)| content)
+        .find(|c| c.starts_with("YOULIAR1;") && c.len() < 512)
 }
 
 #[tauri::command]
@@ -285,14 +379,15 @@ fn replace_session(state: &AppState, s: Option<Session>) {
 
 #[tauri::command]
 fn session_local(app: AppHandle, state: State<AppState>) -> SessionInfo {
-    replace_session(&state, Some(Session::Host(net::start_local(emitter(app)))));
+    let host = net::start_local(emitter(app), state.used_questions(), state.used_sink());
+    replace_session(&state, Some(Session::Host(host)));
     SessionInfo::Local
 }
 
 #[tauri::command]
 async fn session_host(app: AppHandle, state: State<'_, AppState>, game_name: String) -> Result<HostInfo, String> {
     replace_session(&state, None);
-    let h = net::start_host(emitter(app), game_name).await?;
+    let h = net::start_host(emitter(app), game_name, state.used_questions(), state.used_sink()).await?;
     let info = h.info().ok_or("Hôte sans adresse réseau.")?;
     replace_session(&state, Some(Session::Host(h)));
     Ok(info)
@@ -397,6 +492,7 @@ pub fn run() {
                     }
                 }
             }
+            *state.used_path.lock().unwrap() = path.parent().map(|d| d.join("questions_used.json"));
             *state.profiles_path.lock().unwrap() = Some(path);
             Ok(())
         })
@@ -415,6 +511,11 @@ pub fn run() {
             profiles_list,
             profile_create,
             profile_delete,
+            profile_update,
+            wipe_data,
+            app_version,
+            host_qr,
+            scan_qr,
             player_infos,
             calibration_protocol,
             analyze_audio,
@@ -436,4 +537,38 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("erreur au lancement de YouLiar");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_join_qr;
+
+    /// Dessine un QR code en niveaux de gris (8 px par module, marge de 4 modules).
+    fn raster(payload: &str) -> (usize, Vec<u8>) {
+        let qr = qrcode::QrCode::new(payload.as_bytes()).unwrap();
+        let (n, colors) = (qr.width(), qr.to_colors());
+        let (scale, margin) = (8, 4);
+        let size = (n + 2 * margin) * scale;
+        let mut img = vec![255u8; size * size];
+        for (i, c) in colors.iter().enumerate() {
+            if *c == qrcode::Color::Dark {
+                let (mx, my) = (i % n + margin, i / n + margin);
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        img[(my * scale + dy) * size + mx * scale + dx] = 0;
+                    }
+                }
+            }
+        }
+        (size, img)
+    }
+
+    #[test]
+    fn join_qr_round_trip_and_foreign_codes_are_ignored() {
+        let payload = "YOULIAR1;192.168.1.20,10.0.0.5;47820;482913";
+        let (size, img) = raster(payload);
+        assert_eq!(find_join_qr(size, size, &img).as_deref(), Some(payload));
+        let (size, img) = raster("https://example.com");
+        assert_eq!(find_join_qr(size, size, &img), None);
+    }
 }

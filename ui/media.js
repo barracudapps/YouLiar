@@ -208,8 +208,10 @@ export function speak(text) {
       synth.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'fr-FR';
-      u.rate = 1.0;
-      const voice = synth.getVoices().find((v) => v.lang?.startsWith('fr'));
+      const pref = (k) => { try { return localStorage.getItem('yl.' + k); } catch { return null; } };
+      u.rate = Math.min(1.5, Math.max(0.7, Number(pref('rate')) || 1.0));
+      const voices = synth.getVoices();
+      const voice = voices.find((v) => v.voiceURI === pref('voice')) ?? voices.find((v) => v.lang?.startsWith('fr'));
       if (voice) u.voice = voice;
       let done = false;
       const end = (ok) => { if (!done) { done = true; resolve(ok); } };
