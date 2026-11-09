@@ -1,5 +1,7 @@
 //! Application Tauri : commandes appelées par l'interface web.
 
+#[cfg(desktop)]
+mod edge;
 mod net;
 
 use net::{HostInfo, Session, SessionInfo};
@@ -337,6 +339,27 @@ fn live_level(state: State<AppState>, level: f32) {
     }
 }
 
+/// Halo lumineux sur les bords de l'écran. Renvoie `false` là où il n'existe pas
+/// (mobile) : l'interface dessine alors le halo elle-même.
+/// Asynchrone : créer une fenêtre depuis une commande synchrone bloque sous Windows.
+#[tauri::command]
+async fn edge_light(app: AppHandle, on: bool, strength: f32) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        if on {
+            edge::on(&app, if strength.is_finite() { strength } else { 0.5 })?;
+        } else {
+            edge::off(&app);
+        }
+        Ok(true)
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, on, strength);
+        Ok(false)
+    }
+}
+
 #[tauri::command]
 fn game_state(state: State<AppState>) -> Option<GameView> {
     state.session.lock().unwrap().as_ref().and_then(Session::view)
@@ -377,6 +400,17 @@ pub fn run() {
             *state.profiles_path.lock().unwrap() = Some(path);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Les bandes du halo sont des fenêtres : sans cela, elles garderaient
+            // l'application ouverte après la fermeture de la fenêtre principale.
+            #[cfg(desktop)]
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                edge::off(window.app_handle());
+                window.app_handle().exit(0);
+            }
+            #[cfg(not(desktop))]
+            let _ = (window, event);
+        })
         .invoke_handler(tauri::generate_handler![
             profiles_list,
             profile_create,
@@ -396,6 +430,7 @@ pub fn run() {
             game_action,
             game_state,
             live_level,
+            edge_light,
             discovery_start,
             discovery_stop,
         ])

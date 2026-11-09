@@ -1,5 +1,6 @@
 import { Media, speak, Trace } from './media.js';
 import { fx, keepAwake, reducedMotion } from './fx.js';
+import { EdgeLight, lightControl } from './light.js';
 
 const TAURI = window.__TAURI__;
 const app = document.getElementById('app');
@@ -11,6 +12,10 @@ const AVATARS = ['🦊', '🐼', '🐸', '🦁', '🐙', '🦄', '🐯', '🐵',
 const PACKS = { soft: '🍬 Léger', party: '🎉 Soirée', deep: '🌊 Profond', mix: '🎲 Mélange' };
 
 const media = new Media();
+const light = new EdgeLight(media, {
+  invoke: (cmd, args) => (TAURI ? TAURI.core.invoke(cmd, args) : Promise.reject(new Error('no core'))),
+  onAuto: () => toast('💡 Peu de lumière : halo lumineux activé'),
+});
 const S = {
   screen: 'home',
   profiles: [],
@@ -131,6 +136,11 @@ const picked = (name = 'pick') => $$(`input[name="${name}"]:checked`).map((i) =>
 
 function bindCommon() {
   $$('[data-goto]').forEach((b) => (b.onclick = () => go(b.dataset.goto, b.dataset.return ? { returnTo: b.dataset.return } : {})));
+  $$('[data-light]').forEach((b) => (b.onclick = (e) => {
+    e.preventDefault();
+    light.setMode(b.dataset.light);
+    $$('[data-light]').forEach((x) => { x.classList.toggle('sel', x === b); x.setAttribute('aria-checked', String(x === b)); });
+  }));
 }
 
 const gaugeColor = (i) => (i >= 65 ? 'var(--lie)' : i >= 50 ? 'var(--warn)' : 'var(--truth)');
@@ -386,21 +396,25 @@ SCREENS.calibrate = ({ id, returnTo }) => {
           <p>Place ton visage dans l'ovale, bien éclairé de face, et reste immobile pendant 15 secondes.</p>
           <div class="camera-box" id="cbox"><div class="oval"></div></div>
           <p class="center small" id="cinfo"></p>
+          ${lightControl(light.mode)}
           <div class="progress"><div id="cprog" style="width:0"></div></div>
           <div class="row"><button class="ghost grow" id="skip">Passer</button><button class="primary grow" id="start">Démarrer (15 s)</button></div>
         </section>`;
       media.attachPreview($('#cbox'));
+      bindCommon();
       const info = setInterval(() => {
         const w = media.videoWindow(1);
         if (!$('#cinfo')) return clearInterval(info);
         if (!w) return;
         const l = w.reduce((a, s) => a + .299 * s.r + .587 * s.g + .114 * s.b, 0) / w.length;
         const m = w.reduce((a, s) => a + s.motion, 0) / w.length;
-        $('#cinfo').innerHTML = l < 60 ? '<span class="warn">💡 Trop sombre : rapproche-toi d\'une lumière.</span>' : m > 4 ? '<span class="warn">🫨 Ça bouge beaucoup…</span>' : '✓ Image correcte';
+        const dark = light.active ? '💡 Halo allumé — si c\'est encore sombre, rapproche-toi d\'une lumière.' : light.mode === 'off' ? '💡 Trop sombre : rapproche-toi d\'une lumière.' : '💡 Un peu sombre : le halo lumineux va s\'allumer…';
+        $('#cinfo').innerHTML = l < 60 ? `<span class="warn">${dark}</span>` : m > 4 ? '<span class="warn">🫨 Ça bouge beaucoup…</span>' : '✓ Image correcte';
       }, 500);
       $('#skip').onclick = () => { clearInterval(info); show('step'); };
       $('#start').onclick = async () => {
         $('#start').disabled = true; $('#skip').disabled = true;
+        light.hold(true);
         const t0 = performance.now();
         await new Promise((res) => {
           const iv = setInterval(() => {
@@ -410,6 +424,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
           }, 200);
         });
         clearInterval(info);
+        light.hold(false);
         const vs = media.videoWindow(15);
         W.resting = vs ? await call('analyze_video', { samples: vs }) : null;
         const hr = W.resting?.heart_rate;
@@ -673,6 +688,7 @@ const STAGES = {
           <div class="seg wrap" role="radiogroup">${Object.entries(PACKS).map(([k, l]) => `<button role="radio" data-pack="${k}" class="${s.pack === k ? 'sel' : ''}" ${host ? '' : 'disabled'}>${l}</button>`).join('')}</div></div>
         <label class="check"><input type="checkbox" id="aloud" ${s.read_aloud ? 'checked' : ''} ${host ? '' : 'disabled'}> La machine lit les questions à voix haute</label>
         <label class="check"><input type="checkbox" id="cam" ${S.useCamera ? 'checked' : ''}> Caméra sur cet appareil</label>
+        ${S.useCamera ? lightControl(light.mode) : ''}
       </section>
       <button class="ghost" data-goto="rules" data-return="game">📖 Règles & points</button>
       ${uncal.length ? `<p class="warn small center">Tous les joueurs doivent être calibrés avant de commencer.</p>` : ''}
@@ -948,7 +964,7 @@ const STAGES_BIND = {
       $$('[data-pack]').forEach((b) => (b.onclick = () => upd({ pack: b.dataset.pack })));
       $('#aloud').onchange = () => upd({ read_aloud: $('#aloud').checked });
     }
-    $('#cam').onchange = () => { S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera)); media.stop(); };
+    $('#cam').onchange = () => { S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera)); media.stop(); renderGame(true); };
     $('#start') && ($('#start').onclick = async () => {
       try { await media.start({ camera: S.useCamera }); await media.resume(); } catch (e) { return toast(e.message, true); }
       fx.play('start');
