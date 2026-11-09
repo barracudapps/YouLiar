@@ -89,7 +89,11 @@ backBtn.onclick = async () => {
     if (Date.now() - leaveArmed > 2500) { leaveArmed = Date.now(); return toast('Appuie encore pour quitter la partie.'); }
     await leaveSession();
   }
-  if (S.screen === 'calibrate') media.cancelRecording?.();
+  if (S.screen === 'calibrate') {
+    window.speechSynthesis?.cancel();
+    media.cancelRecording?.();
+    light.hold(false);
+  }
   const back = { calibrate: S.params.returnTo ?? 'profiles', rules: S.params.returnTo ?? 'home' }[S.screen] ?? 'home';
   go(back);
 };
@@ -345,6 +349,10 @@ SCREENS.calibrate = ({ id, returnTo }) => {
   const profile = S.profiles.find((p) => p.id === id);
   if (!profile) return go('profiles');
   const W = { steps: [], i: 0, takes: [], resting: null, camera: S.useCamera };
+  // Un enregistrement, une lecture ou une mesure peuvent se terminer après que l'on a
+  // quitté l'écran : ils ne doivent plus rien afficher ni enregistrer.
+  const token = (S.calibToken = (S.calibToken ?? 0) + 1);
+  const alive = () => S.screen === 'calibrate' && S.calibToken === token;
   const head = () => `<h2>${esc(profile.avatar)} Calibrage de ${esc(profile.name)}</h2>`;
 
   const phases = {
@@ -425,8 +433,10 @@ SCREENS.calibrate = ({ id, returnTo }) => {
         });
         clearInterval(info);
         light.hold(false);
+        if (!alive()) return;
         const vs = media.videoWindow(15);
         W.resting = vs ? await call('analyze_video', { samples: vs }) : null;
+        if (!alive()) return;
         const hr = W.resting?.heart_rate;
         $('#cinfo').innerHTML = hr ? `♥ Pouls estimé : <b>${Math.round(hr)} bpm</b>` : '<span class="warn">Signal de pouls trop faible (lumière ? mouvement ?). L\'agitation sera quand même mesurée.</span>';
         $('#start').textContent = 'Continuer →';
@@ -449,6 +459,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
         <p class="muted small center">${answer ? 'La question sera lue à voix haute, puis réponds naturellement en une phrase.' : 'L\'enregistrement s\'arrête seul quand tu as fini.'}</p>`;
       $('#ready').onclick = async () => {
         const res = await captureAnswer($('#rec'), { prompt: st.prompt, readAloud: answer }).catch(() => null);
+        if (!alive()) return;
         if (!res) return show('step');
         if (!res.audio.speech_detected) { toast('Je n\'ai rien entendu… recommence plus près du micro.', true); return show('step'); }
         W.takes.push({ kind: st.kind, audio: res.audio, video: res.video });
@@ -462,6 +473,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
       try {
         await call('calibration_finish', { profileId: id, takes: W.takes, resting: W.resting });
         await loadProfiles();
+        if (!alive()) return;
         const p = S.profiles.find((x) => x.id === id);
         // Si une partie est en cours, on met à jour le joueur côté hôte.
         if (S.session.mode !== 'none' && playerById(id)) {
@@ -485,7 +497,7 @@ SCREENS.calibrate = ({ id, returnTo }) => {
       }
     },
   };
-  const show = (ph) => phases[ph]();
+  const show = (ph) => { if (alive()) phases[ph](); };
   show('intro');
 };
 
