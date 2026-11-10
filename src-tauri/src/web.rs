@@ -12,10 +12,13 @@
 
 use crate::net::{serve_peer, HostShared, Rd, Wr};
 use futures_util::{SinkExt, StreamExt};
+use flate2::{write::GzEncoder, Compression};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -28,6 +31,10 @@ use tokio_tungstenite::WebSocketStream;
 pub const DEFAULT_WEB_PORT: u16 = 47822;
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_HTTP_CONNECTIONS: usize = 64;
+
+/// Versions compressées déjà calculées, par empreinte du contenu (l'interface est figée
+/// dans l'application : quelques dizaines de fichiers au plus).
+const MAX_GZ_CACHE: usize = 128;
 
 /// Fichiers de l'interface : chemin → (contenu, type MIME).
 pub type Assets = Arc<dyn Fn(&str) -> Option<(Vec<u8>, String)> + Send + Sync>;
@@ -87,10 +94,12 @@ fn safe_host(req: &Request) -> Option<String> {
 }
 
 async fn respond<S: AsyncWrite + Unpin>(stream: &mut S, status: &str, mime: &str, body: &[u8], extra: &str) {
+    // Les fichiers de l'interface se revalident (ETag) ; tout le reste n'est jamais gardé.
+    let cache = if extra.contains("ETag:") { "Cache-Control: no-cache\r\nVary: Accept-Encoding\r\n" } else { "Cache-Control: no-store\r\n" };
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\
+        "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
          X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\n\
-         Permissions-Policy: camera=(self), microphone=(self), geolocation=()\r\n{extra}Connection: close\r\n\r\n",
+         Permissions-Policy: camera=(self), microphone=(self), geolocation=()\r\n{extra}{cache}Connection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes()).await;
@@ -137,8 +146,50 @@ where
          img-src 'self' data: blob:; media-src 'self' blob: mediastream:; style-src 'self' 'unsafe-inline'; \
          object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n"
     );
-    let body = if req.method == "HEAD" { &[][..] } else { &bytes[..] };
-    respond(&mut stream, "200 OK", &mime_for(&file, &mime), body, &csp).await;
+    let mime = mime_for(&file, &mime);
+    let digest = Sha256::digest(&bytes);
+    let etag = format!("\"{}\"", digest[..12].iter().map(|b| format!("{b:02x}")).collect::<String>());
+    if req.header("if-none-match").is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+        return respond(&mut stream, "304 Not Modified", &mime, b"", &format!("ETag: {etag}\r\n")).await;
+    }
+    let gzip = req.header("accept-encoding").is_some_and(|v| v.split(',').any(|e| e.trim().starts_with("gzip")));
+    let packed = if gzip { gzipped(&etag, &mime, &bytes) } else { None };
+    let mut extra = format!("{csp}ETag: {etag}\r\n");
+    let body: &[u8] = match &packed {
+        Some(gz) => {
+            extra.push_str("Content-Encoding: gzip\r\n");
+            gz
+        }
+        None => &bytes,
+    };
+    let body = if req.method == "HEAD" { &[][..] } else { body };
+    respond(&mut stream, "200 OK", &mime, body, &extra).await;
+}
+
+/// Version gzip d'un fichier texte ou WebAssembly, calculée une fois : le moteur (≈ 600 Kio)
+/// est ainsi envoyé environ trois fois plus vite sur un Wi-Fi chargé.
+fn gzipped(etag: &str, mime: &str, bytes: &[u8]) -> Option<Arc<Vec<u8>>> {
+    let compressible = mime.starts_with("text/") || ["javascript", "wasm", "json", "svg"].iter().any(|k| mime.contains(k));
+    if !compressible || bytes.len() < 1024 {
+        return None;
+    }
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(gz) = cache.lock().ok()?.get(etag) {
+        return Some(gz.clone());
+    }
+    let mut enc = GzEncoder::new(Vec::with_capacity(bytes.len() / 2), Compression::default());
+    enc.write_all(bytes).ok()?;
+    let gz = Arc::new(enc.finish().ok()?);
+    if gz.len() >= bytes.len() {
+        return None;
+    }
+    let mut map = cache.lock().ok()?;
+    if map.len() >= MAX_GZ_CACHE {
+        map.clear();
+    }
+    map.insert(etag.to_string(), gz.clone());
+    Some(gz)
 }
 
 /// Relie un WebSocket au service des appareils : messages binaires ⇄ flux d'octets.
@@ -255,7 +306,11 @@ mod tests {
     use youliar_core::secure::{Handshake, Role as SRole};
 
     fn assets() -> Assets {
-        Arc::new(|p: &str| (p == "index.html").then(|| (b"<!doctype html><title>YouLiar</title>".to_vec(), "text/html".into())))
+        Arc::new(|p: &str| match p {
+            "index.html" => Some((b"<!doctype html><title>YouLiar</title>".to_vec(), "text/html".into())),
+            "app.js" => Some(("console.log('YouLiar');\n".repeat(200).into_bytes(), "text/javascript".into())),
+            _ => None,
+        })
     }
 
     async fn plain_server(h: Arc<HostShared>) -> u16 {
@@ -270,11 +325,39 @@ mod tests {
     }
 
     async fn get(port: u16, path: &str) -> String {
+        String::from_utf8_lossy(&request(port, path, "").await).into_owned()
+    }
+
+    async fn request(port: u16, path: &str, headers: &str) -> Vec<u8> {
         let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).await.unwrap();
-        let mut out = String::new();
-        s.read_to_string(&mut out).await.unwrap();
+        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{headers}\r\n").as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
         out
+    }
+
+    #[test]
+    fn interface_files_are_compressed_and_revalidated() {
+        tauri::async_runtime::block_on(async {
+            let emit: Emit = Arc::new(|_: &str, _| {});
+            let host = start_host(emit, "Web".into(), vec![], None).await.unwrap();
+            let port = plain_server(host).await;
+            let raw = request(port, "/app.js", "Accept-Encoding: gzip, br\r\n").await;
+            let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+            assert!(head.contains("Content-Encoding: gzip") && head.contains("Cache-Control: no-cache"), "{head}");
+            let mut plain = String::new();
+            std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&raw[split + 4..]), &mut plain).unwrap();
+            assert_eq!(plain, "console.log('YouLiar');\n".repeat(200));
+            assert!(raw.len() < plain.len() / 4);
+
+            let etag = head.lines().find_map(|l| l.strip_prefix("ETag: ")).unwrap().to_string();
+            let again = get(port, "/app.js").await;
+            assert!(!again.contains("Content-Encoding"), "sans Accept-Encoding : contenu brut");
+            let cached = String::from_utf8_lossy(&request(port, "/app.js", &format!("If-None-Match: {etag}\r\n")).await).into_owned();
+            assert!(cached.starts_with("HTTP/1.1 304") && cached.ends_with("\r\n\r\n"), "{cached}");
+            assert!(get(port, "/nope.js").await.contains("Cache-Control: no-store"));
+        });
     }
 
     fn frame(payload: &[u8]) -> Vec<u8> {
@@ -376,7 +459,9 @@ mod e2e {
             for _ in 0..600 {
                 if let Some(p) = host.view().players.iter().find(|p| p.info.id != "a") {
                     println!("E2E joined: {} {}", p.info.name, p.info.avatar);
-                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    tokio::time::sleep(Duration::from_secs(12)).await;
+                    let v = host.view();
+                    println!("E2E end: {} players, {} connected", v.players.len(), v.players.iter().filter(|p| p.connected).count());
                     host.shutdown();
                     return;
                 }

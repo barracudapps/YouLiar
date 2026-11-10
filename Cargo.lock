@@ -4810,6 +4810,7 @@ dependencies = [
 name = "youliar"
 version = "0.8.0"
 dependencies = [
+ "flate2",
  "futures-util",
  "if-addrs",
  "qrcode",
