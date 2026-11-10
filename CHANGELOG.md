@@ -6,6 +6,19 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.9.0] — 2026-11-10
+
+### Ajouté
+- **Bonus de série ⚡** : 3 votes justes d'affilée rapportent +1 (puis à 6, 9…) ; un vote
+  raté remet le compteur à zéro. La série en cours s'affiche dans les scores.
+
+### Amélioré
+- **Navigateur** : recharger la page (fréquent sur téléphone) reprend sa place dans la
+  partie au lieu de renvoyer à l'accueil. Icône et couleur d'application sur l'écran
+  d'accueil du téléphone.
+- **Performances** : l'interface et le moteur sont envoyés compressés aux navigateurs
+  (environ 3 fois moins de données) et ne sont plus retéléchargés à chaque visite.
+
 ## [0.8.0] — 2026-11-09
 
 ### Ajouté
