@@ -27,8 +27,9 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 ```
 
-Test de bout en bout avec un vrai navigateur : `YOULIAR_E2E=/tmp/e2e.txt cargo test -p youliar
-e2e_browser -- --ignored`, puis ouvrir `https://127.0.0.1:<port écrit dans le fichier>/#join=<code>`.
+Test de bout en bout avec un vrai navigateur (Google Chrome requis) : `./scripts/e2e/run.sh`.
+Un hôte réel démarre, Chrome sans interface crée un joueur, rejoint, recharge la page et
+analyse une voix de synthèse en WebAssembly ; captures dans `$TMPDIR/youliar-e2e`.
 
 ### Mobile
 

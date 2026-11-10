@@ -1,0 +1,8 @@
+{
+  "name": "youliar-e2e",
+  "private": true,
+  "description": "Headless Chrome joins a real YouLiar host from the browser",
+  "dependencies": {
+    "puppeteer-core": "23.11.1"
+  }
+}
