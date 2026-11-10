@@ -53,7 +53,13 @@ pub struct Player {
     pub device: String,
     pub score: i32,
     pub connected: bool,
+    /// Votes justes consécutifs (bonus de série).
+    #[serde(default)]
+    pub streak: u32,
 }
+
+/// Votes justes d'affilée qui rapportent le bonus « flair », puis à chaque multiple.
+pub const STREAK_BONUS_EVERY: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +131,9 @@ pub enum Stage {
 pub struct Outcome {
     pub points: BTreeMap<String, i32>,
     pub machine_correct: bool,
+    /// Joueurs qui touchent le bonus de série à cette manche.
+    #[serde(default)]
+    pub streak_bonus: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,6 +219,8 @@ pub struct PlayerView {
     pub info: PlayerInfo,
     pub score: i32,
     pub connected: bool,
+    #[serde(default)]
+    pub streak: u32,
     /// Ce joueur est contrôlé par l'appareil qui reçoit la vue.
     pub mine: bool,
 }
@@ -421,8 +432,16 @@ impl Game {
         let mut add = |id: &str, pts: i32| *outcome.points.entry(id.to_string()).or_default() += pts;
         add(&r.subject, 0);
         for (voter, v) in &r.votes {
+            let streak = self.players.iter_mut().find(|p| &p.info.id == voter).map(|p| {
+                p.streak = if v.lie == truth { p.streak + 1 } else { 0 };
+                p.streak
+            });
             if v.lie == truth {
                 add(voter, if v.sure { 2 } else { 1 });
+                if streak.is_some_and(|n| n % STREAK_BONUS_EVERY == 0) {
+                    add(voter, 1);
+                    outcome.streak_bonus.push(voter.clone());
+                }
             } else {
                 add(&r.subject, 1);
                 if v.sure {
@@ -486,7 +505,7 @@ impl Game {
                             if self.players.len() >= 12 {
                                 return err("La partie est complète (12 joueurs).");
                             }
-                            self.players.push(Player { info, device: device.into(), score: 0, connected: true });
+                            self.players.push(Player { info, device: device.into(), score: 0, connected: true, streak: 0 });
                         }
                         None => return err("La partie a déjà commencé."),
                     }
@@ -534,7 +553,10 @@ impl Game {
                 self.round_no = 0;
                 self.machine = MachineStats::default();
                 self.history.clear();
-                self.players.iter_mut().for_each(|p| p.score = 0);
+                self.players.iter_mut().for_each(|p| {
+                    p.score = 0;
+                    p.streak = 0;
+                });
                 self.begin_round();
             }
             Action::NewQuestion if self.stage == Stage::Free => {
@@ -603,7 +625,7 @@ impl Game {
                 let Some(verdict) = r.verdict.as_ref() else { return err("Action non autorisée.") };
                 let correct = verdict.is_lie == lie;
                 r.lie = Some(lie);
-                r.outcome = Some(Outcome { points: BTreeMap::new(), machine_correct: correct });
+                r.outcome = Some(Outcome { machine_correct: correct, ..Default::default() });
                 self.machine.total += 1;
                 if correct {
                     self.machine.correct += 1;
@@ -787,7 +809,7 @@ impl Game {
             players: self
                 .players
                 .iter()
-                .map(|p| PlayerView { info: p.info.clone(), score: p.score, connected: p.connected, mine: p.device == device })
+                .map(|p| PlayerView { info: p.info.clone(), score: p.score, connected: p.connected, streak: p.streak, mine: p.device == device })
                 .collect(),
             round: self.round.as_ref().map(|r| RoundView {
                 number: r.number,
@@ -824,6 +846,28 @@ mod tests {
 
     fn verdict(is_lie: bool) -> Verdict {
         Verdict { probability: if is_lie { 0.8 } else { 0.2 }, index: 0, label: String::new(), is_lie, factors: vec![], heart_rate: None, confidence: 0.5, speaker: None }
+    }
+
+    #[test]
+    fn three_right_votes_in_a_row_earn_the_streak_bonus() {
+        let mut g = Game::new(StdRng::seed_from_u64(3));
+        for id in ["a", "b"] {
+            let info = PlayerInfo { id: id.into(), name: id.into(), avatar: "🙂".into(), calibrated: true };
+            g.players.push(Player { info, device: HOST_DEVICE.into(), score: 0, connected: true, streak: 0 });
+        }
+        let play = |g: &mut Game, right: bool| {
+            g.round = Some(Round { number: 1, subject: "a".into(), asker: None, choices: vec![], question: "?".into(), question_locked: true, lie: Some(true), verdict: Some(verdict(true)), votes: BTreeMap::from([("b".to_string(), Vote { lie: right, sure: false })]), outcome: None });
+            g.reveal();
+            g.round.take().unwrap().outcome.unwrap()
+        };
+        assert!(play(&mut g, true).streak_bonus.is_empty());
+        assert!(play(&mut g, true).streak_bonus.is_empty());
+        let o = play(&mut g, true);
+        assert_eq!(o.streak_bonus, vec!["b".to_string()]);
+        assert_eq!(o.points["b"], 2, "vote juste + bonus de série");
+        assert!(play(&mut g, false).streak_bonus.is_empty());
+        assert_eq!(g.players[1].streak, 0, "un vote raté remet la série à zéro");
+        assert_eq!(g.players[1].score, 4);
     }
 
     #[test]

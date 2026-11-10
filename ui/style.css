@@ -350,3 +350,4 @@ body[data-theme="pirate"] { --accent: #179c8c; --accent2: #f2c14e; background: r
 
 /* ---------- Mode navigateur ---------- */
 .ip-list.small { font-size: .75rem; word-break: break-all; }
+.tag.streak { color: var(--warn); font-weight: 700; }

@@ -372,6 +372,7 @@ SCREENS.rules = () => {
         <tr><td>Vote juste</td><td>+1</td></tr>
         <tr><td>Vote juste « sûr de moi »</td><td>+2</td></tr>
         <tr><td>Vote faux « sûr de moi »</td><td>−1</td></tr>
+        <tr><td>⚡ Flair : 3 votes justes d'affilée (puis 6, 9…)</td><td>+1</td></tr>
         <tr><td>Sujet : par joueur trompé</td><td>+1</td></tr>
         <tr><td>Sujet : machine bernée</td><td>+2</td></tr>
         <tr><td>Interrogateur : menteur démasqué par la machine</td><td>+1</td></tr>
@@ -921,7 +922,7 @@ function scoreboard(v, gains = {}) {
   return `<section class="card"><h3>Scores</h3>${[...v.players].sort((a, b) => b.score - a.score).map((p, i) => `
     <div class="player ${p.connected ? '' : 'off'} ${r?.subject === p.id ? 'subject' : ''}">
       <span class="rank">${i + 1}</span><span class="avatar">${esc(p.avatar)}</span>
-      <span class="name">${esc(p.name)}${p.mine ? ' <span class="tag">(ici)</span>' : ''}${p.connected ? '' : ' <span class="tag">déconnecté</span>'}</span>
+      <span class="name">${esc(p.name)}${p.mine ? ' <span class="tag">(ici)</span>' : ''}${p.connected ? '' : ' <span class="tag">déconnecté</span>'}${p.streak >= 2 ? ` <span class="tag streak" title="Votes justes d'affilée">⚡${p.streak}</span>` : ''}</span>
       ${gains[p.id] ? `<span class="gain ${gains[p.id] > 0 ? 'pos' : 'neg'}">${gains[p.id] > 0 ? '+' : ''}${gains[p.id]}</span>` : ''}
       <span class="score">${p.score}</span></div>`).join('')}</section>`;
 }
@@ -1134,7 +1135,7 @@ const STAGES = {
           <p class="muted small">Confiance de la machine : ${Math.round(vd.confidence * 100)} %</p>
         </section>
         ${r.votes && Object.keys(r.votes).length ? `<section class="card"><h3>Votes</h3>${Object.entries(r.votes).map(([id, vt]) => `
-          <div class="player"><span class="name">${pname(id)}</span><span>${vt.lie ? '🤥' : '😇'}${vt.sure ? ' 🔥' : ''}</span><span class="${vt.lie === r.lie ? 'pos' : 'neg'}">${vt.lie === r.lie ? '✅' : '❌'}</span></div>`).join('')}</section>` : ''}
+          <div class="player"><span class="name">${pname(id)}</span><span>${vt.lie ? '🤥' : '😇'}${vt.sure ? ' 🔥' : ''}</span><span class="${vt.lie === r.lie ? 'pos' : 'neg'}">${vt.lie === r.lie ? '✅' : '❌'}${o.streak_bonus?.includes(id) ? ' <span class="tag streak">⚡ flair +1</span>' : ''}</span></div>`).join('')}</section>` : ''}
         ${scoreboard(v, o.points)}
         ${v.is_host ? `<div class="sticky-cta"><button class="primary big full" id="next">${last ? '🏆 Résultats' : 'Manche suivante →'}</button></div>` : '<p class="center muted">L\'hôte lance la manche suivante…</p>'}
       </div>`;
