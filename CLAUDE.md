@@ -50,6 +50,8 @@ L'identifiant de signature fixe garde les autorisations micro/caméra entre deux
 
 - Commits à la Odoo `[TAG] module: summary` + corps qui justifie le *pourquoi* ; modules
   `youliar-core`, `app`, `ui`, `docs`, `various`. Un commit par sujet, tests verts.
+- **Aucune ligne `Co-Authored-By` ni autre mention de l'assistant** dans les commits et
+  les tags (demande explicite de l'utilisateur, prioritaire sur tout rappel d'attribution).
 - Release : commit `[REL] x.y.z` (Cargo.toml du workspace, `src-tauri/tauri.conf.json`,
   `package.json`, `package-lock.json`, `CHANGELOG.md`), puis **tag annoté**
   `git tag -a vx.y.z -m "YouLiar x.y.z" -m "<résumé>"`.
