@@ -8,6 +8,10 @@
 import init, * as yl from './web/youliar_web.js';
 
 const PROFILES_KEY = 'yl.web.profiles';
+// Partie en cours de cet onglet (code, joueurs, jeton de reprise) : un rechargement de la
+// page, fréquent sur téléphone, reprend la place au lieu d'éjecter le joueur.
+// sessionStorage : propre à l'onglet, effacé à sa fermeture.
+const SESSION_KEY = 'yl.web.session';
 const MAX_FRAME = 256 * 1024;
 const REFUSALS = {
   0: 'Code de partie incorrect.',
@@ -133,10 +137,18 @@ function dispatch(c, msg) {
   }
 }
 
+function remember() {
+  try {
+    if (conn) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ code: conn.code, players: conn.players, resume: conn.resume }));
+    else sessionStorage.removeItem(SESSION_KEY);
+  } catch { /* stockage indisponible : pas de reprise après rechargement */ }
+}
+
 function end(reason) {
   if (!conn) return;
   clearInterval(conn.ping);
   conn = null;
+  remember();
   if (reason) emit('session-ended', reason);
 }
 
@@ -152,6 +164,7 @@ async function lost(c) {
       const next = await connect(conn.code, conn.players, conn.resume);
       conn.link = next;
       conn.resume = next.resume;
+      remember();
       emit('link-status', 'connected');
       return;
     } catch (e) {
@@ -159,6 +172,27 @@ async function lost(c) {
     }
   }
   end("Connexion perdue avec l'hôte.");
+}
+
+function attach(link, code, players) {
+  conn = { link, code, players, resume: link.resume, closing: false };
+  conn.ping = setInterval(() => { try { send(conn.link, { type: 'ping' }); } catch { /* reconnexion en cours */ } }, 5000);
+  remember();
+}
+
+/** Après un rechargement : reprend la partie de cet onglet, si l'hôte la garde encore. */
+async function resumeSaved() {
+  let saved;
+  try { saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) ?? 'null'); } catch { saved = null; }
+  if (!saved?.code || !saved.resume || !Array.isArray(saved.players)) return;
+  try {
+    const link = await connect(saved.code, saved.players, saved.resume);
+    attach(link, saved.code, saved.players);
+    // L'état suit l'accueil de près : on l'attend un court instant pour afficher la partie.
+    for (let i = 0; i < 20 && !link.view; i++) await new Promise((r) => setTimeout(r, 100));
+  } catch {
+    try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignoré */ }
+  }
 }
 
 async function join({ code, profileIds }) {
@@ -169,8 +203,7 @@ async function join({ code, profileIds }) {
   stop();
   let link;
   try { link = await connect(code, players, null); } catch (e) { throw new Error(e.message); }
-  conn = { link, code, players, resume: link.resume, closing: false };
-  conn.ping = setInterval(() => { try { send(conn.link, { type: 'ping' }); } catch { /* reconnexion en cours */ } }, 5000);
+  attach(link, code, players);
   Object.keys(sessionMeasures).forEach((k) => delete sessionMeasures[k]);
   return { mode: 'client', host: location.host };
 }
@@ -245,6 +278,7 @@ const COMMANDS = {
 export async function install() {
   await init();
   loadProfiles();
+  await resumeSaved();
   return {
     web: true,
     core: {
