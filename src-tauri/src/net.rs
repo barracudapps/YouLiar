@@ -334,7 +334,7 @@ impl HostShared {
         }
     }
 
-    fn is_banned(&self, ip: IpAddr) -> bool {
+    pub(crate) fn is_banned(&self, ip: IpAddr) -> bool {
         let mut g = self.guard.lock().unwrap();
         match g.per_ip.get(&ip) {
             Some((_, Some(until))) if Instant::now() < *until => true,

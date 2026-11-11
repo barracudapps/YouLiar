@@ -31,6 +31,40 @@ use tokio_tungstenite::WebSocketStream;
 pub const DEFAULT_WEB_PORT: u16 = 47822;
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_HTTP_CONNECTIONS: usize = 64;
+/// Un navigateur ouvre quelques connexions en parallèle (fichiers + WebSocket) : au-delà,
+/// un seul appareil ne doit pas pouvoir occuper toutes les places des autres invités.
+const MAX_HTTP_PER_IP: usize = 12;
+
+/// Connexions ouvertes par adresse ; la place est rendue quand le jeton est lâché.
+#[derive(Clone, Default)]
+struct PerIp(Arc<Mutex<HashMap<IpAddr, usize>>>);
+
+struct IpSlot(PerIp, IpAddr);
+
+impl PerIp {
+    fn try_take(&self, ip: IpAddr) -> Option<IpSlot> {
+        let mut map = self.0.lock().ok()?;
+        let n = map.entry(ip).or_default();
+        if *n >= MAX_HTTP_PER_IP {
+            return None;
+        }
+        *n += 1;
+        Some(IpSlot(self.clone(), ip))
+    }
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.0 .0.lock() {
+            if let Some(n) = map.get_mut(&self.1) {
+                *n -= 1;
+                if *n == 0 {
+                    map.remove(&self.1);
+                }
+            }
+        }
+    }
+}
 
 /// Versions compressées déjà calculées, par empreinte du contenu (l'interface est figée
 /// dans l'application : quelques dizaines de fichiers au plus).
@@ -279,14 +313,20 @@ pub async fn start(h: &Arc<HostShared>, assets: Assets, cert_dir: Option<PathBuf
         info.refresh_url();
     }
     let slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
+    let per_ip = PerIp::default();
     let hh = h.clone();
     h.spawn(async move {
         while let Ok((tcp, addr)) = listener.accept().await {
+            // Appareil banni pour avoir raté le code : il n'obtient même plus la page.
+            if hh.is_banned(addr.ip()) {
+                continue;
+            }
+            let Some(ip_slot) = per_ip.try_take(addr.ip()) else { continue };
             let Ok(permit) = slots.clone().try_acquire_owned() else { continue };
             let _ = tcp.set_nodelay(true);
             let (h2, acceptor, assets) = (hh.clone(), acceptor.clone(), assets.clone());
             hh.spawn(async move {
-                let _permit = permit;
+                let _permit = (permit, ip_slot);
                 if let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
                     serve_http(h2, assets, tls, addr.ip()).await;
                 }
@@ -334,6 +374,18 @@ mod tests {
         let mut out = Vec::new();
         s.read_to_end(&mut out).await.unwrap();
         out
+    }
+
+    #[test]
+    fn one_device_cannot_take_every_connection_slot() {
+        let per_ip = PerIp::default();
+        let (a, b): (IpAddr, IpAddr) = ("192.168.1.10".parse().unwrap(), "192.168.1.11".parse().unwrap());
+        let held: Vec<_> = (0..MAX_HTTP_PER_IP).map(|_| per_ip.try_take(a).unwrap()).collect();
+        assert!(per_ip.try_take(a).is_none(), "plafond atteint pour cet appareil");
+        assert!(per_ip.try_take(b).is_some(), "les autres invités passent toujours");
+        drop(held);
+        assert!(per_ip.try_take(a).is_some(), "places rendues à la fermeture");
+        assert!(per_ip.0.lock().unwrap().get(&b).is_none(), "aucune entrée qui traîne");
     }
 
     #[test]
