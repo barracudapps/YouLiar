@@ -47,6 +47,15 @@ const S = {
 function pref(k, d) { try { return localStorage.getItem('yl.' + k) ?? d; } catch { return d; } }
 function setPref(k, v) { try { localStorage.setItem('yl.' + k, v); } catch { /* stockage indisponible */ } }
 
+/** Taille du texte : téléphone posé sur la table ou passé de main en main, à bout de bras. */
+const TEXT_SIZES = [['100', 'Normal'], ['115', 'Grand'], ['130', 'Très grand']];
+function applyTextSize(v = pref('text', '100')) {
+  const ok = TEXT_SIZES.some(([k]) => k === v) ? v : '100';
+  document.documentElement.style.fontSize = ok === '100' ? '' : `${ok}%`;
+  return ok;
+}
+applyTextSize();
+
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const $ = (sel, root = app) => root.querySelector(sel);
 const $$ = (sel, root = app) => [...root.querySelectorAll(sel)];
@@ -72,6 +81,43 @@ async function call(cmd, args, opts) {
 }
 
 const act = (action) => call('game_action', { action }).catch(() => {});
+
+/** Résumé texte de la partie, pour la conversation de groupe (aucune donnée de voix). */
+function resultsText(v) {
+  const name = (id) => { const p = v.players.find((x) => x.id === id); return p ? `${p.avatar} ${p.name}` : '?'; };
+  const machine = v.machine.total ? `🤖 La machine a vu juste ${v.machine.correct} fois sur ${v.machine.total}.` : '';
+  if (v.settings.mode === 'free') {
+    const confessed = v.history.filter((h) => h.lie != null).length;
+    return [`🎤 YouLiar — ${v.settings.game_name}`, `${v.history.length} question(s) posée(s), ${confessed} aveu(x).`, machine].filter(Boolean).join('\n');
+  }
+  const t = themeOf(v);
+  const ranking = [...v.players].sort((a, b) => b.score - a.score);
+  const medals = ['🥇', '🥈', '🥉'];
+  return [
+    `🕵️ YouLiar — ${v.settings.game_name}${t ? ` (${t.emoji} ${t.name})` : ''}`,
+    ...ranking.map((p, i) => `${medals[i] ?? `${i + 1}.`} ${p.avatar} ${p.name} : ${p.score} pt${Math.abs(p.score) > 1 ? 's' : ''}${t ? ` — ${rankTitle(t, i, ranking.length)}` : ''}`),
+    machine,
+    ...awards(v).map((a) => `${a.icon} ${a.title} : ${name(a.player)}`),
+  ].filter(Boolean).join('\n');
+}
+
+async function shareResults(v) {
+  const text = resultsText(v);
+  try {
+    if (navigator.share) {
+      await navigator.share({ title: 'YouLiar', text });
+      return;
+    }
+  } catch (e) {
+    if (e?.name === 'AbortError') return; // partage annulé par le joueur
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Résultats copiés : colle-les dans ta conversation 📋');
+  } catch {
+    toast('Copie impossible sur cet appareil.', true);
+  }
+}
 
 function playerById(id) { return S.view?.players.find((p) => p.id === id); }
 function pname(id) { const p = playerById(id); return p ? `${esc(p.avatar)} ${esc(p.name)}` : '?'; }
@@ -318,7 +364,7 @@ SCREENS.home = () => {
     <nav class="menu">
       <button data-goto="join"><span class="emoji">🔗</span><span>Rejoindre la partie<small>${INVITE ? 'Code reçu avec le lien' : 'Code affiché chez l\'hôte'}</small></span></button>
       <button data-goto="profiles"><span class="emoji">🎙️</span><span>Joueurs & calibrage<small>${S.profiles.length} profil(s) · ${calibrated} calibré(s) · enregistrés dans ce navigateur</small></span></button>
-      <button data-goto="settings"><span class="emoji">⚙️</span><span>Réglages<small>Son, vibrations, caméra, voix, données</small></span></button>
+      <button data-goto="settings"><span class="emoji">⚙️</span><span>Réglages<small>Texte, son, vibrations, caméra, voix, données</small></span></button>
       <button data-goto="rules"><span class="emoji">📖</span><span>Comment jouer<small>Mode jeu, mode libre, points</small></span></button>
     </nav>
     ${DISCLAIMER}`;
@@ -336,7 +382,7 @@ SCREENS.home = () => {
       <button data-goto="host" ${calibrated ? '' : 'class="dim"'}><span class="emoji">📡</span><span>Créer une partie réseau<small>Mode jeu ou libre · chacun son appareil</small></span></button>
       <button data-goto="join"><span class="emoji">🔗</span><span>Rejoindre une partie<small>Découverte automatique ou adresse IP</small></span></button>
       <button data-goto="profiles"><span class="emoji">🎙️</span><span>Joueurs & calibrage<small>${S.profiles.length} profil(s) · ${calibrated} calibré(s)</small></span></button>
-      <button data-goto="settings"><span class="emoji">⚙️</span><span>Réglages<small>Son, vibrations, caméra, voix, données</small></span></button>
+      <button data-goto="settings"><span class="emoji">⚙️</span><span>Réglages<small>Texte, son, vibrations, caméra, voix, données</small></span></button>
       <button data-goto="rules"><span class="emoji">📖</span><span>Comment jouer<small>Mode jeu, mode libre, points</small></span></button>
     </nav>
     ${DISCLAIMER}`;
@@ -399,6 +445,10 @@ SCREENS.settings = () => {
   const rate = Number(pref('rate', '1')) || 1;
   app.innerHTML = `
     <h2>⚙️ Réglages</h2>
+    <section class="card"><h3>Affichage</h3>
+      <div class="field"><span>Taille du texte</span>
+        <div class="seg" role="radiogroup" aria-label="Taille du texte">${TEXT_SIZES.map(([k, label]) => `<button role="radio" aria-checked="${k === applyTextSize()}" class="${k === applyTextSize() ? 'sel' : ''}" data-text="${k}">${label}</button>`).join('')}</div></div>
+    </section>
     <section class="card"><h3>Sons et vibrations</h3>
       <label class="check"><input type="checkbox" id="snd" ${fx.muted ? '' : 'checked'}> Effets sonores</label>
       <label class="check"><input type="checkbox" id="hap" ${fx.haptics ? 'checked' : ''}> Vibrations (mobile)</label>
@@ -423,6 +473,11 @@ SCREENS.settings = () => {
   $('#snd').onchange = () => { if (fx.muted === $('#snd').checked) fx.toggle(); updateMute(); };
   $('#hap').onchange = () => { fx.setHaptics($('#hap').checked); fx.buzz(30); };
   $('#cam').onchange = () => { S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera)); };
+  $$('[data-text]').forEach((b) => b.onclick = () => {
+    setPref('text', b.dataset.text);
+    applyTextSize(b.dataset.text);
+    $$('[data-text]').forEach((x) => { x.classList.toggle('sel', x === b); x.setAttribute('aria-checked', String(x === b)); });
+  });
   if (synth) {
     $('#voice').onchange = () => setPref('voice', $('#voice').value);
     $('#rate').oninput = () => { setPref('rate', $('#rate').value); $('#ratev').textContent = Number($('#rate').value).toFixed(1) + '×'; };
@@ -1150,6 +1205,7 @@ const STAGES = {
           ${v.machine.total ? `<p>🤖 Sur les aveux, la machine a vu juste <b>${v.machine.correct}</b> fois sur <b>${v.machine.total}</b>.</p>` : ''}</section>
         ${v.history.length ? `<section class="card"><h3>Toutes les questions</h3>${v.history.map((h) => recapRow(h)).join('')}</section>` : ''}
         ${v.is_host ? '<button class="primary big" id="again">Retour au salon</button>' : ''}
+        <button id="share">📤 Partager le résumé</button>
         <button class="ghost" id="quit">Quitter</button>`;
     }
     const ranking = [...v.players].sort((a, b) => b.score - a.score);
@@ -1170,6 +1226,7 @@ const STAGES = {
         <p class="muted small">${acc >= 60 ? 'Elle commence à bien vous connaître…' : 'Vous êtes de sacrés comédiens !'} Plus vous jouez, plus elle apprend vos tics.</p></section>
       ${v.history.length ? `<section class="card"><h3>Récapitulatif</h3>${v.history.map((h) => recapRow(h)).join('')}</section>` : ''}
       ${v.is_host ? '<button class="primary big" id="again">Rejouer</button>' : ''}
+      <button id="share">📤 Partager les résultats</button>
       <button class="ghost" id="quit">Quitter</button>`;
   },
 };
@@ -1387,6 +1444,7 @@ const STAGES_BIND = {
       if (t && winner && v.settings.mode !== 'free') setTimeout(() => narrate(v, 'epilogue', t.epilogue.replace('{winner}', winner.name)), 1500);
     }
     $('#again') && ($('#again').onclick = () => act({ type: 'back_to_lobby' }));
+    $('#share').onclick = () => shareResults(v);
     $('#quit').onclick = async () => { await leaveSession(); go('home'); };
   },
 };
