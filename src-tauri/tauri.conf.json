@@ -39,7 +39,25 @@
     ],
     "macOS": {
       "entitlements": "./Entitlements.plist",
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJFMTBENTREMkU2MEM1OTkKUldTWnhXQXVUZFVRdmlnbnNMUTIybHZydHVYQnNZQXRwTkRhMXVIS2dsOTRNSmJQcW8xa0cxWUYK",
+      "endpoints": [
+        "https://github.com/barracudapps/YouLiar/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

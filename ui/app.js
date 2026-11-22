@@ -40,6 +40,8 @@ const S = {
   flowKey: null,      // empêche de re-dessiner l'écran pendant un enregistrement
   live: { player: null, level: 0, at: 0 },
   useCamera: pref('camera', 'true') === 'true',
+  update: null,       // mise à jour disponible annoncée par le cœur (bureau, Android)
+  updating: null,     // progression du téléchargement (0..1) une fois lancé
 };
 
 // ---------- Utilitaires ----------
@@ -248,6 +250,48 @@ function bindCommon() {
   }));
 }
 
+// ---------- Mises à jour ----------
+
+/** Carte « nouvelle version », posée dans l'emplacement #update-slot de l'écran. */
+function updateCard() {
+  const u = S.update;
+  if (!u) return '';
+  const pct = S.updating == null ? null : Math.round(S.updating * 100);
+  return `<section class="card update" aria-live="polite">
+    <div class="row">
+      <span class="emoji" aria-hidden="true">🆕</span>
+      <div class="grow"><b>YouLiar ${esc(u.version)} est disponible</b><br><small class="muted">${u.in_app
+        ? 'Installation en quelques secondes, puis l\'application redémarre.'
+        : 'Télécharge la nouvelle version puis ouvre-la pour l\'installer par-dessus.'}</small></div>
+      <button class="primary" id="update-go" ${pct != null ? 'disabled' : ''}>${pct != null ? `${pct} %` : u.in_app ? 'Installer' : 'Télécharger'}</button>
+    </div>
+    ${pct != null ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+    ${u.notes ? `<details><summary class="small">Nouveautés</summary><p class="small notes">${esc(u.notes)}</p></details>` : ''}
+  </section>`;
+}
+
+let updateArmed = 0;
+function renderUpdate() {
+  const slot = $('#update-slot');
+  if (!slot) return;
+  slot.innerHTML = updateCard();
+  const btn = $('#update-go', slot);
+  if (!btn) return;
+  btn.onclick = async () => {
+    // Installer relance l'application : prévenir avant de couper une partie.
+    if (S.update.in_app && S.session.mode !== 'none' && Date.now() - updateArmed > 3000) {
+      updateArmed = Date.now();
+      return toast('Appuie encore : la partie en cours sera fermée pendant la mise à jour.', true);
+    }
+    if (S.update.in_app) { S.updating = 0; renderUpdate(); }
+    try {
+      await call('update_install');
+    } catch {
+      S.updating = null; renderUpdate();
+    }
+  };
+}
+
 const gaugeColor = (i) => (i >= 65 ? 'var(--lie)' : i >= 50 ? 'var(--warn)' : 'var(--truth)');
 
 /** Jauge à aiguille ; l'aiguille est une rotation CSS, donc animable. */
@@ -377,6 +421,7 @@ SCREENS.home = () => {
       <p class="muted">Calibre ta voix, réponds aux questions… et tente de berner la machine et tes amis.</p>
       ${first ? '<button class="primary big" data-goto="profiles">Commencer : crée ton joueur</button>' : ''}
     </section>
+    <div id="update-slot"></div>
     <nav class="menu">
       <button data-goto="local" ${calibrated ? '' : 'class="dim"'}><span class="emoji">👥</span><span>Partie sur cet appareil<small>Mode jeu ou libre · on se passe le téléphone</small></span></button>
       <button data-goto="host" ${calibrated ? '' : 'class="dim"'}><span class="emoji">📡</span><span>Créer une partie réseau<small>Mode jeu ou libre · chacun son appareil</small></span></button>
@@ -387,6 +432,7 @@ SCREENS.home = () => {
     </nav>
     ${DISCLAIMER}`;
   bindCommon();
+  renderUpdate();
 };
 
 SCREENS.rules = () => {
@@ -468,8 +514,18 @@ SCREENS.settings = () => {
       <p class="small">Tes profils (empreinte vocale, pouls de repos, réponses apprises) restent <b>uniquement sur cet appareil</b>. Ni la voix ni l'image ne sont enregistrées ou envoyées.</p>
       <button class="ghost danger" id="wipe">🗑 Effacer toutes mes données</button>
     </section>
+    ${WEB ? '' : `<div id="update-slot"></div>
+    <p class="center"><button class="ghost" id="update-check">🔄 Rechercher une mise à jour</button></p>`}
     <p class="center muted small" id="about">YouLiar</p>`;
   bindCommon();
+  renderUpdate();
+  if ($('#update-check')) $('#update-check').onclick = async () => {
+    const found = await call('update_check').catch(() => undefined);
+    if (found === undefined) return;
+    S.update = found;
+    renderUpdate();
+    if (!found) toast('YouLiar est à jour ✓');
+  };
   $('#snd').onchange = () => { if (fx.muted === $('#snd').checked) fx.toggle(); updateMute(); };
   $('#hap').onchange = () => { fx.setHaptics($('#hap').checked); fx.buzz(30); };
   $('#cam').onchange = () => { S.useCamera = $('#cam').checked; setPref('camera', String(S.useCamera)); };
@@ -1582,6 +1638,14 @@ async function boot() {
       // Le code n'est affiché que dans le salon ; ne pas interrompre un enregistrement.
       if (S.screen === 'game' && S.view?.stage === 'lobby') renderGame(true);
     }
+  });
+  await listen('update-available', (e) => { S.update = e.payload; renderUpdate(); });
+  await listen('update-progress', (e) => {
+    S.updating = e.payload;
+    const btn = $('#update-go'), bar = $('#update-slot .bar i');
+    if (btn) btn.textContent = `${Math.round(e.payload * 100)} %`;
+    if (bar) bar.style.width = `${Math.round(e.payload * 100)}%`;
+    else renderUpdate();
   });
   await listen('discovery', (e) => { S.discovered = e.payload; if (S.screen === 'join') renderFound(); });
   await loadProfiles().catch(() => {});

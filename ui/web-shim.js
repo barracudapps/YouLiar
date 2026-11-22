@@ -258,6 +258,9 @@ const COMMANDS = {
     replace(JSON.parse(yl.profile_learn(JSON.stringify(profile(profileId)), JSON.stringify(audio), JSON.stringify(video ?? null), !!lie, !!machineCorrect))),
   themes_list: () => JSON.parse(yl.themes()),
   app_version: () => yl.version(),
+  // Le navigateur reçoit toujours l'interface de l'hôte : rien à mettre à jour ici.
+  update_check: () => null,
+  update_install: unavailable,
   wipe_data: () => { stop(); profiles = []; try { localStorage.removeItem(PROFILES_KEY); } catch { /* ignoré */ } },
   session_info: () => (conn ? { mode: 'client', host: location.host } : { mode: 'none' }),
   game_state: () => conn?.link?.view ?? null,

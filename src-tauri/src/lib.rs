@@ -3,6 +3,7 @@
 #[cfg(desktop)]
 mod edge;
 mod net;
+mod update;
 mod web;
 
 use net::{HostInfo, Session, SessionInfo};
@@ -427,9 +428,16 @@ fn discovery_stop(state: State<AppState>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_opener::init());
+    builder
         .manage(AppState::default())
+        .manage(update::UpdateState::default())
         .setup(|app| {
+            update::spawn_checks(app.handle().clone());
             let state = app.state::<AppState>();
             let path = app.path().app_data_dir()?.join("profiles.json");
             if let Ok(bytes) = std::fs::read(&path) {
@@ -463,6 +471,8 @@ pub fn run() {
             profile_update,
             wipe_data,
             app_version,
+            update::update_check,
+            update::update_install,
             themes_list,
             host_qr,
             scan_qr,
