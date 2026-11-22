@@ -80,12 +80,32 @@ L'identifiant de signature fixe garde les autorisations micro/caméra entre deux
   `git tag -a vx.y.z -m "YouLiar x.y.z" -m "<résumé>"`.
 - Champ ajouté au protocole ou au profil : `#[serde(default)]` pour rester compatible ;
   incrémenter `PROTOCOL_VERSION` seulement si le format change de façon incompatible.
-- Dépôt : https://github.com/barracudapps/YouLiar (public depuis 0.11.0, pour que les apps lisent les releases), branche `master`, `git push`
-  puis `git push origin vx.y.z` : le tag déclenche la CI de release (suivre avec
-  `gh run watch`). Secrets et clés : CONTRIBUTING.md ; clés locales dans `~/.tauri/`
-  (`youliar.key*`, `youliar-android.*`), irremplaçables. Historique propre (aucune ligne d'attribution, tous les tags
-  annotés) depuis le 2026-11-11. Un push forcé est bloqué par le mode automatique : donner la
-  commande à l'utilisateur (préfixe `!`), avec `--force-with-lease`.
+- Dépôt : https://github.com/barracudapps/YouLiar (public depuis 0.11.0, pour que les apps
+  lisent les releases), branche `master`. Historique propre (aucune ligne d'attribution, tous
+  les tags annotés) depuis le 2026-11-11. Un push forcé est bloqué par le mode automatique :
+  donner la commande à l'utilisateur (préfixe `!`), avec `--force-with-lease`.
+
+## Publier une version
+
+1. Commits du sujet, puis `[REL] x.y.z` et tag annoté (voir ci-dessus).
+2. Pousser **en HTTPS via gh** : la clé SSH a une phrase de passe, `git push origin` échoue
+   (même avec `!`). Sans toucher à la config git :
+   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push https://github.com/barracudapps/YouLiar.git master vx.y.z`
+   puis `git update-ref refs/remotes/origin/master master` (origin/master reste sinon périmé).
+   gh (brew) est connecté avec le scope `workflow`, requis pour modifier `.github/workflows`.
+3. Vérifier que le tag a lancé la CI : `gh run list -R barracudapps/YouLiar`. Sinon :
+   `gh workflow run release.yml -R barracudapps/YouLiar --ref master -f tag=vx.y.z`
+   (`-f android_only=true` ne recompile que l'APK d'une release déjà publiée). Suivre avec
+   `gh run watch <id> --exit-status` en arrière-plan (~15 min, Android le plus long).
+4. Contrôler : `latest.json` de la release (9 entrées darwin/linux/windows), APK présent et
+   signé (`apksigner verify --print-certs`, SHA-256 `8cd44268…17fb`).
+5. Installer sur ce Mac le build de la CI (`YouLiar_universal.app.tar.gz`, extrait dans un
+   dossier vide du bloc-notes), ou laisser l'app installée se mettre à jour via son bandeau.
+
+Secrets GitHub (posés par l'utilisateur ; `gh secret set` avec une clé privée est bloqué
+par le mode automatique) et clés : CONTRIBUTING.md. Clés locales dans `~/.tauri/`
+(`youliar.key*` minisign, `youliar-android.jks/.password`, alias `youliar`) : irremplaçables,
+ne jamais les régénérer (les apps installées refuseraient les mises à jour).
 
 ## Vérifier avant d'annoncer
 
@@ -99,9 +119,17 @@ L'identifiant de signature fixe garde les autorisations micro/caméra entre deux
   `NODE_PATH=scripts/e2e/node_modules`.
 - Halo : comportement réel testé sur l'écran de l'utilisateur ; la fenêtre principale est
   ramenée dans le cadre puis restaurée.
-- Pas encore testé sur un vrai téléphone (avertissement de certificat iPhone notamment).
+- Pas encore testé sur un vrai téléphone (avertissement de certificat iPhone notamment ;
+  APK Android jamais installé sur un appareil).
+- Mise à jour réelle d'une version installée vers la suivante pas encore observée : à
+  vérifier à la 0.11.1 (bandeau sur l'accueil, installation, redémarrage).
+- Mises à jour : en `cargo run`/debug, aucune vérification (`cfg!(debug_assertions)`) ; pour
+  tester le bandeau, maquette UI avec un faux événement `update-available`
+  (`{ version, notes, in_app }`).
 
 ## Pistes non faites
 
 Bluetooth, détection de visage, test sur téléphones réels, vérifier si l'Edge Light de
-macOS explique un second halo signalé.
+macOS explique un second halo signalé. iOS (compte Apple Developer payant requis),
+notarisation macOS et signature Windows (avertissement au premier lancement). Actions
+GitHub en Node 20 dépréciées (checkout@v4, setup-java@v4…) : passer aux versions récentes.
