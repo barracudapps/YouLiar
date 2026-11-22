@@ -20,6 +20,10 @@ on:
       tag:
         description: Tag existant à recompiler (ex. v0.11.0)
         required: true
+      android_only:
+        description: Ne recompiler que l'APK Android (release déjà publiée)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -77,6 +81,7 @@ jobs:
 
   desktop:
     needs: prepare
+    if: ${{ !inputs.android_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -139,11 +144,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
-      - name: NDK
+      # Le SDK Android est préinstallé sur les machines Ubuntu de GitHub (ANDROID_HOME) ;
+      # android-actions/setup-android échoue en cherchant le paquet « tools », retiré du SDK.
+      - name: NDK et licences du SDK
         run: |
-          sdkmanager --install "ndk;28.2.13676358"
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdk" --licenses > /dev/null || true
+          "$sdk" --install "ndk;28.2.13676358" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 20
