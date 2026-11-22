@@ -6,6 +6,28 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), ver
 Les versions 0.1.0 à 0.3.0 sont des étapes de développement antérieures à l'historique git,
 qui commence à 0.4.0. Elles sont décrites ici pour garder la trace des choix, sans tag.
 
+## [0.11.0] — 2026-11-22
+
+### Ajouté
+- **Mises à jour automatiques** : chaque version publiée est compilée par GitHub (macOS
+  universel, Windows, Linux, Android). L'application vérifie au démarrage puis toutes les
+  6 heures et propose d'installer la nouvelle version en un clic ; elle redémarre toute
+  seule. Paquets signés, refusés si la signature ne correspond pas. Bouton « Rechercher une
+  mise à jour » dans les réglages.
+- **Android** : APK signé publié avec chaque version ; l'application signale les nouvelles
+  versions et ouvre le téléchargement.
+
+## [0.10.0] — 2026-11-11
+
+### Ajouté
+- **Partager les résultats** en fin de partie : classement, scores, précision de la machine
+  et trophées en texte, via le partage du téléphone ou le presse-papiers.
+- **Taille du texte** réglable (Normal, Grand, Très grand) pour lire de loin.
+
+### Sécurité
+- Page web de l'hôte : au plus 12 connexions simultanées par appareil, et les appareils
+  bannis pour codes erronés sont refusés avant même la connexion chiffrée.
+
 ## [0.9.0] — 2026-11-10
 
 ### Ajouté

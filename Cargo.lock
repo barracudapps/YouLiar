@@ -5716,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "youliar"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
  "futures-util",
@@ -5744,7 +5744,7 @@ dependencies = [
 
 [[package]]
 name = "youliar-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "chacha20poly1305",
  "hkdf",
@@ -5758,7 +5758,7 @@ dependencies = [
 
 [[package]]
 name = "youliar-web"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "getrandom 0.2.17",
  "rand 0.8.8",
