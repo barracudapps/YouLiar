@@ -52,3 +52,32 @@ MINEUR pour une fonctionnalité compatible, CORRECTIF pour un correctif.
 `PROTOCOL_VERSION` (`crates/youliar-core/src/protocol.rs`) est indépendant : il augmente à
 chaque changement du format échangé sur le réseau, pour que des versions incompatibles se
 refusent proprement au lieu d'échouer en pleine partie.
+
+## Publication automatique
+
+Pousser le tag `vx.y.z` déclenche `.github/workflows/release.yml` : vérification que le tag
+correspond aux numéros de version, release brouillon avec la section du CHANGELOG, builds
+macOS universel / Windows / Linux / Android, puis publication. Les apps installées voient
+la mise à jour dès que la release est publique (`latest.json` de la dernière release).
+Un tag déjà poussé se recompile depuis l'onglet Actions (« Run workflow »).
+
+Secrets du dépôt (Settings → Secrets and variables → Actions) :
+
+| Secret | Contenu |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | clé privée minisign (`~/.tauri/youliar.key`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | son mot de passe |
+| `ANDROID_KEYSTORE_BASE64` | `base64 -i ~/.tauri/youliar-android.jks` |
+| `ANDROID_KEYSTORE_PASSWORD` | mot de passe du keystore (alias `youliar`) |
+
+**Ces deux clés ne se remplacent pas** : sans la clé minisign, les apps installées
+refusent toute nouvelle version ; sans le keystore, Android refuse d'installer l'APK
+par-dessus. Les sauvegarder hors de cette machine.
+
+Build local avec les paquets de mise à jour :
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/youliar.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.tauri/youliar.key.password)"
+npx tauri build --bundles app
+```

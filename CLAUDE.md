@@ -19,7 +19,14 @@ anglais ; commentaires et textes d'interface en français.
   découverte UDP, limites anti-abus, reprise par jeton, `serve_peer` commun aux transports),
   `web.rs` (HTTPS auto-signé port 47822, `/ws` ponté vers `serve_peer`, gzip + ETag,
   12 connexions max par IP, IP bannies refusées avant TLS),
-  `edge.rs` (halo d'écran façon Teams : 4 fenêtres-bandes dans la zone de travail).
+  `edge.rs` (halo d'écran façon Teams : 4 fenêtres-bandes dans la zone de travail),
+  `update.rs` (mises à jour : greffon updater sur bureau, lien APK sur Android, événement
+  `update-available`, jamais d'installation sans clic).
+- `src-tauri/gen/android` — projet Android versionné (manifeste avec autorisations, signature
+  si `keystore.properties` existe).
+- `.github/workflows/release.yml` — à chaque tag `vx.y.z` : vérifie les versions, release
+  brouillon (texte = section du CHANGELOG), builds macOS universel / Windows / Linux / APK,
+  puis publication → les apps installées se mettent à jour.
 - `ui/` — `app.js` (écrans), `web-shim.js` (émule `window.__TAURI__` dans le navigateur :
   wasm + localStorage + WebSocket, reprise après rechargement via sessionStorage),
   `media.js`, `fx.js`, `light.js`, `edge.html`, `style.css` (tailles en `rem` : le réglage
@@ -42,17 +49,23 @@ Pièges de l'environnement :
 cargo test --workspace && cargo clippy --workspace --all-targets   # avant chaque commit
 npm run web                                  # après tout changement de crates/youliar-web ou du cœur
 ./scripts/e2e/run.sh                         # Chrome sans interface rejoint un vrai hôte
-npx tauri build --bundles app                # → target/release/bundle/macos/YouLiar.app
+# Build local : la clé de mise à jour est obligatoire (createUpdaterArtifacts)
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/youliar.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.tauri/youliar.key.password)"
+npx tauri build --bundles app                # → target/release/bundle/macos/YouLiar.app (signé ad hoc)
+# Android : ANDROID_HOME=~/Library/Android/sdk NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
+npx tauri android build --apk
 ```
 
 Installer dans /Applications (quitter l'app d'abord si elle tourne : `osascript -e 'quit app "YouLiar"'`) :
 
 ```bash
 rm -rf /Applications/YouLiar.app && cp -R target/release/bundle/macos/YouLiar.app /Applications/
-codesign --force --deep --sign - --identifier com.barracudapps.youliar \
-  --entitlements src-tauri/Entitlements.plist /Applications/YouLiar.app
 codesign --verify /Applications/YouLiar.app && open /Applications/YouLiar.app
 ```
+
+Le bundler signe déjà ad hoc (identité `-`, identifiant et entitlements fixes, runtime
+renforcé) : ne plus re-signer à la main. Les versions suivantes arrivent par la mise à jour
+automatique dès que la release GitHub est publiée.
 
 L'identifiant de signature fixe garde les autorisations micro/caméra entre deux versions.
 
@@ -67,8 +80,10 @@ L'identifiant de signature fixe garde les autorisations micro/caméra entre deux
   `git tag -a vx.y.z -m "YouLiar x.y.z" -m "<résumé>"`.
 - Champ ajouté au protocole ou au profil : `#[serde(default)]` pour rester compatible ;
   incrémenter `PROTOCOL_VERSION` seulement si le format change de façon incompatible.
-- Dépôt : https://github.com/barracudapps/YouLiar (privé), branche `master`, `git push`
-  puis `git push origin vx.y.z`. Historique propre (aucune ligne d'attribution, tous les tags
+- Dépôt : https://github.com/barracudapps/YouLiar (public depuis 0.11.0, pour que les apps lisent les releases), branche `master`, `git push`
+  puis `git push origin vx.y.z` : le tag déclenche la CI de release (suivre avec
+  `gh run watch`). Secrets et clés : CONTRIBUTING.md ; clés locales dans `~/.tauri/`
+  (`youliar.key*`, `youliar-android.*`), irremplaçables. Historique propre (aucune ligne d'attribution, tous les tags
   annotés) depuis le 2026-11-11. Un push forcé est bloqué par le mode automatique : donner la
   commande à l'utilisateur (préfixe `!`), avec `--force-with-lease`.
 

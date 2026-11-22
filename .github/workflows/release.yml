@@ -1,0 +1,189 @@
+# Compile et publie YouLiar à chaque tag de version (vx.y.z).
+#
+# 1. `prepare` vérifie que le tag correspond aux numéros de version du dépôt et crée une
+#    release brouillon dont le texte est la section du CHANGELOG.
+# 2. `desktop` compile macOS (universel), Windows et Linux ; tauri-action signe les paquets de
+#    mise à jour (clé minisign) et complète latest.json, lu par les apps installées.
+# 3. `android` compile l'APK signé et l'ajoute à la release.
+# 4. `publish` rend la release publique une fois les versions ordinateur prêtes : c'est
+#    à ce moment que les apps installées voient la mise à jour.
+#
+# Secrets requis : TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+# ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD (voir CONTRIBUTING.md).
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag existant à recompiler (ex. v0.11.0)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  WASM_BINDGEN: wasm-bindgen-cli@0.2.130
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Vérifier les numéros de version
+        id: version
+        run: |
+          v="${TAG#v}"
+          check() { [ "$2" = "$v" ] || { echo "::error::$1 indique $2, le tag $TAG"; exit 1; }; }
+          check tauri.conf.json "$(jq -r .version src-tauri/tauri.conf.json)"
+          check package.json "$(jq -r .version package.json)"
+          check Cargo.toml "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Notes de version (CHANGELOG)
+        run: |
+          v="${TAG#v}"
+          awk -v v="$v" '
+            /^## \[/ { if (on) exit; if (index($0, "[" v "]")) { on = 1; next } }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "YouLiar $v" > notes.md
+          cat notes.md
+      - name: Créer la release brouillon
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+                 --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+          if [ -z "$id" ]; then
+            id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -X POST \
+                   -f tag_name="$TAG" -f name="YouLiar ${TAG#v}" -F draft=true \
+                   -F body=@notes.md --jq .id)
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+            targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
+          - os: windows-latest
+            args: --bundles nsis
+            targets: wasm32-unknown-unknown
+          - os: ubuntu-22.04
+            args: --bundles appimage,deb
+            targets: wasm32-unknown-unknown
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Dépendances système (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ env.WASM_BINDGEN }}
+      - name: Shell bash pour les scripts npm (Windows)
+        if: runner.os == 'Windows'
+        # `npm run web` est un script bash : sous Windows, npm passerait par cmd.exe.
+        run: echo "npm_config_script_shell=C:\Program Files\Git\bin\bash.exe" >> $env:GITHUB_ENV
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          args: ${{ matrix.args }}
+          updaterJsonPreferNsis: true
+
+  android:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: NDK
+        run: |
+          sdkmanager --install "ndk;28.2.13676358"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android,wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ env.WASM_BINDGEN }}
+      - run: npm ci
+      - name: Clé de signature Android
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          dir=src-tauri/gen/android
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/youliar.jks"
+          printf 'storeFile=%s\npassword=%s\nkeyAlias=youliar\n' "$RUNNER_TEMP/youliar.jks" "$PASSWORD" > "$dir/keystore.properties"
+      - run: npx tauri android build --apk
+      - name: Joindre l'APK à la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-release.apk' | head -1)
+          [ -n "$apk" ] || { echo "::error::APK introuvable"; exit 1; }
+          cp "$apk" "YouLiar_${VERSION}_android.apk"
+          gh release upload "$TAG" "YouLiar_${VERSION}_android.apk" --clobber
+
+  publish:
+    needs: [prepare, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publier la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/${{ needs.prepare.outputs.release_id }}" \
+            -X PATCH -F draft=false -f make_latest=true

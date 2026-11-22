@@ -7,6 +7,32 @@ en mentant ou non. La machine rend un verdict, les autres votent, et on compte l
 > ⚠️ C'est un **jeu**. La machine mesure des signes de stress et des écarts aux habitudes
 > du joueur. Aucun algorithme ne détecte réellement le mensonge (les polygraphes non plus).
 
+## Installer
+
+Chaque version publiée se trouve dans les
+[releases GitHub](https://github.com/barracudapps/YouLiar/releases/latest) :
+
+| Système | Fichier | Mises à jour |
+|---|---|---|
+| macOS (Apple Silicon et Intel) | `YouLiar_x.y.z_universal.dmg` | automatiques, dans l'app |
+| Windows | `YouLiar_x.y.z_x64-setup.exe` | automatiques, dans l'app |
+| Linux | `.AppImage` (mises à jour) ou `.deb` | automatiques avec l'AppImage |
+| Android | `YouLiar_x.y.z_android.apk` | l'app signale la version et ouvre l'APK |
+
+L'application vérifie au démarrage puis toutes les 6 heures ; un bandeau propose
+d'installer la nouvelle version, qui redémarre l'app. Rien ne s'installe sans un clic,
+pour ne jamais couper une partie. Les paquets de mise à jour sont signés (minisign) et
+refusés si la signature ne correspond pas à la clé publique de `tauri.conf.json`.
+
+Premier lancement : l'app n'est pas notariée par Apple ni signée pour Windows.
+Sur macOS, clic droit sur YouLiar → Ouvrir (ou Réglages → Confidentialité et sécurité →
+Ouvrir quand même) ; sur Windows, SmartScreen → Informations complémentaires → Exécuter.
+Sur Android, autoriser l'installation depuis le navigateur. Les mises à jour suivantes ne
+redemandent rien sur ordinateur.
+
+iOS n'est pas publié : distribuer une app iPhone demande un compte Apple Developer
+(TestFlight ou App Store).
+
 ## Lancer
 
 ```bash
@@ -34,12 +60,13 @@ analyse une voix de synthèse en WebAssembly ; captures dans `$TMPDIR/youliar-e2
 ### Mobile
 
 ```bash
-npx tauri android init && npx tauri android dev   # Android Studio + NDK requis
+npx tauri android dev                             # Android Studio + NDK requis
 npx tauri ios init && npx tauri ios dev           # Xcode requis (macOS)
 ```
 
-* **Android** : ajouter `RECORD_AUDIO`, `CAMERA`, `INTERNET`, `ACCESS_WIFI_STATE`,
-  `CHANGE_WIFI_MULTICAST_STATE` dans `gen/android/app/src/main/AndroidManifest.xml`.
+* **Android** : le projet est versionné dans `src-tauri/gen/android` (autorisations micro,
+  caméra et réseau local déjà déclarées dans `AndroidManifest.xml`). Les APK de version
+  sont signés si `src-tauri/gen/android/keystore.properties` existe (créé par la CI).
 * **iOS** : les textes d'autorisation micro / caméra / réseau local sont dans
   `src-tauri/Info.plist`. Pour la découverte automatique (broadcast UDP), Apple exige
   l'entitlement `com.apple.developer.networking.multicast` (sur demande). Sans lui, il
